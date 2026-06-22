@@ -8,10 +8,10 @@
     <link
         href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=3">
+    <link rel="stylesheet" href="style.css?v=4">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script type="module" src="firebase-config.js"></script>
-    <script type="module" src="app.js?v=10"></script>
+    <script type="module" src="app.js?v=11"></script>
 </head>
 
 <body>
@@ -40,7 +40,6 @@
 
         <section id="view-landing" class="view active">
             <div class="glass-panel text-center fade-in-up premium-landing-panel" style="max-width: 540px;">
-                <div class="workbook-badge"><span class="workbook-icon">BI</span> LIVE DASHBOARD</div>
                 <div class="breathing-logo">
                     <h1 class="logo-title" id="app-title-display">Digiversity 2026 <span>Power BI</span></h1>
                 </div>
@@ -322,12 +321,14 @@
                     <div class="dashboard-col">
                         <div class="flex-between mb-3">
                             <h3>My Quizzes</h3>
-                            <button id="btn-open-maker" class="btn btn-secondary text-small">+ New Quiz</button>
+                            <div class="flex gap-2">
+                                <button id="btn-import-legacy-quizzes" class="btn btn-secondary text-small">Import Old Power BI Quizzes</button>
+                                <button id="btn-open-maker" class="btn btn-secondary text-small">+ New Quiz</button>
+                            </div>
                         </div>
                         <div id="custom-quizzes-list" class="flex-col gap-3">
                             <p class="text-muted text-small text-center">Loading quizzes...</p>
                         </div>
-                            <!-- Import button removed -->
                     </div>
 
                     <div class="dashboard-col">

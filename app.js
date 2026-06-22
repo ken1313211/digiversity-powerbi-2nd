@@ -58,6 +58,7 @@ const DEFAULT_APP_SUBTITLE = "Model. Visualize. Analyze. Compete.";
 const ADMIN_PASSWORD = "eypowerbi2026";
 const ADMIN_SESSION_KEY = "powerbi_instructor_authenticated";
 const SESSION_ROOT = "powerbiSessions";
+const LEGACY_QUIZ_PACK_URL = "./data/legacy-powerbi-quizzes.json";
 let currentAppTitle = DEFAULT_APP_TITLE;
 let currentAppSubtitle = DEFAULT_APP_SUBTITLE;
 try {
@@ -569,6 +570,8 @@ function buildMakerBlock(typeSelect) {
 
 
 function setupHostManagementWorkflow() {
+    document.getElementById("btn-import-legacy-quizzes")?.addEventListener("click", importLegacyPowerBiQuizzes);
+
     document.getElementById("btn-open-maker")?.addEventListener("click", () => {
         editingQuizIndex = null;
         document.getElementById("maker-quiz-title").value = "";
@@ -689,6 +692,75 @@ function setupHostManagementWorkflow() {
         await syncPresetsToFirebase();
         enterHostDashboard();
     });
+}
+
+async function importLegacyPowerBiQuizzes() {
+    const button = document.getElementById("btn-import-legacy-quizzes");
+    const originalLabel = button?.textContent || "Import Old Power BI Quizzes";
+
+    if (!confirm("Import the 8 quizzes and 54 questions from the old Power BI database export? Existing quiz titles will be skipped.")) {
+        return;
+    }
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Importing...";
+    }
+
+    try {
+        const response = await fetch(LEGACY_QUIZ_PACK_URL, { cache: "no-store" });
+        if (!response.ok) throw new Error(`Quiz pack could not be loaded (${response.status}).`);
+
+        const legacyQuizzes = await response.json();
+        if (!Array.isArray(legacyQuizzes)) throw new Error("The old quiz pack has an invalid format.");
+
+        const existingTitles = new Set(
+            powerBiPresets.map(quiz => String(quiz.title || "").trim().toLowerCase())
+        );
+        const importedQuizzes = [];
+
+        legacyQuizzes.forEach(quiz => {
+            const title = String(quiz.title || "").trim();
+            const normalizedTitle = title.toLowerCase();
+            if (!title || existingTitles.has(normalizedTitle) || !Array.isArray(quiz.questions)) return;
+
+            const questions = quiz.questions
+                .filter(question => question && question.text && Array.isArray(question.options))
+                .map(question => ({
+                    type: "multiple-choice",
+                    text: String(question.text),
+                    options: question.options.map(option => String(option)),
+                    correct: Number(question.correct) || 0,
+                    timeLimit: Number(question.timeLimit) || 20,
+                    image: question.image || ""
+                }));
+
+            if (questions.length === 0) return;
+            importedQuizzes.push({ title, questions });
+            existingTitles.add(normalizedTitle);
+        });
+
+        if (importedQuizzes.length === 0) {
+            alert("No quizzes were imported. All old quiz titles are already present.");
+            return;
+        }
+
+        powerBiPresets.push(...importedQuizzes);
+        localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
+        await syncPresetsToFirebase();
+        renderQuizSelector();
+
+        const questionCount = importedQuizzes.reduce((sum, quiz) => sum + quiz.questions.length, 0);
+        alert(`Imported ${importedQuizzes.length} quizzes with ${questionCount} questions.`);
+    } catch (error) {
+        console.error("Old Power BI quiz import failed:", error);
+        alert(`Import failed: ${error.message}`);
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
+    }
 }
 
 async function syncPresetsToFirebase() {

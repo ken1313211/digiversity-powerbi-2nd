@@ -51,6 +51,8 @@ The browser contains all application logic. Firebase Realtime Database is used a
 ### Quiz builder
 
 - Add and reorder activity blocks.
+- One-click import of 8 legacy Power BI quizzes and 54 questions from `data/legacy-powerbi-quizzes.json`.
+- Legacy imports are merged by quiz title, so existing quizzes are not overwritten or duplicated.
 - Per-question timer from 5 to 120 seconds.
 - Optional base64 image upload.
 - Validation and visual error highlighting.

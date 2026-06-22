@@ -288,35 +288,6 @@ h3 {
     -webkit-text-fill-color: transparent;
 }
 
-.workbook-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.65rem;
-    margin-bottom: 1.25rem;
-    padding: 0.42rem 0.8rem;
-    border: 1px solid rgba(103, 221, 158, 0.28);
-    border-radius: 6px;
-    background: rgba(4, 20, 12, 0.62);
-    color: #BDEBD1;
-    font-family: var(--font-code);
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.16em;
-}
-
-.workbook-icon {
-    display: grid;
-    place-items: center;
-    width: 23px;
-    height: 23px;
-    background: #F2C811;
-    color: #1F1F1F;
-    font-family: var(--font-heading);
-    font-weight: 800;
-    letter-spacing: 0;
-    box-shadow: 5px 0 0 rgba(91, 141, 239, 0.34);
-}
-
 .settings-panel {
     border: 1px solid var(--glass-border);
     border-radius: 10px;
