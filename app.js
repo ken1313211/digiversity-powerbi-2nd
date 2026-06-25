@@ -1,2711 +1,4621 @@
-import {
-    database, ref, set, get, update, onValue, remove, child, push, onChildAdded, runTransaction, onDisconnect,
-    isFirebaseEnabled
-} from "./firebase-config.js";
+import { database, auth, storage, ref, set, get, update, onValue, remove, child, push, onChildAdded, runTransaction, increment, onDisconnect, storageRef, uploadBytes, getDownloadURL, isFirebaseEnabled, getCurrentUser, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from './firebase-config.js';
+import { generateDashboardGame, serializeRound, deserializeToChartConfig, getTutorialRounds, getRandomScenarioPreset } from './dashboard-engine.js';
+import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
 // ==========================================
-// 1. POWER BI BRANDED PRESETS & CONFIG
+// STATE
 // ==========================================
-const defaultPresets = [
+Chart.register(ChartDataLabels);
+const PAGE_PARAMS = new URLSearchParams(window.location.search);
+const IS_SIMULATOR_CLIENT = PAGE_PARAMS.get('sim') === '1' || window.self !== window.top;
+if (!IS_SIMULATOR_CLIENT && sessionStorage.getItem('dashboard_wars_host_session')) {
+    sessionStorage.removeItem('dashboard_wars_player_session');
+}
+let currentGamePin = null;
+let isHost = false;
+let myPlayerId = null;
+let myNickname = null;
+let currentGameState = null;
+let currentQuestionIndex = 0;
+let questions = [];
+let currentHostedQuizTitle = '';
+let hostTimerInterval = null;
+let pointsDecayInterval = null;
+let timeRemaining = 0;
+let hasAnsweredThisRound = false;
+let previousRank = null;
+let emojiCooldown = false;
+const MAX_FLOATING_EMOJIS = 15;
+let lastInitializedQuestionIndex = -1;
+let answerClickLocked = false;
+let hostPausedAt = 0;
+let makerCollapsed = [];
+let sessionStartTime = Date.now();
+let questionConclusionInProgress = false;
+let currentPlayerConnectionRef = null;
+let playerPresenceUnsubscribe = null;
+const processedAttackIds = new Set();
+let syncedPlayerQuestionStartTime = 0;
+let syncedPlayerQuestionTimeLimit = 20;
+let syncedPlayerQuestionPaused = false;
+
+let customQuizzes = {};
+let makerQuestions = [];
+let sessionHistory = {};
+let currentEditingQuizId = null;
+
+// Dashboard + Team State
+let currentGameMode = 'classic';
+let dashboardRounds = [];
+let playerChartInstance = null;
+let hostChartInstance = null;
+let resultChartInstance = null;
+let teamModeEnabled = false;
+let teamCount = 4;
+let currentTeamLabelMode = 'groups';
+let playerDashTimerInterval = null;
+const TEAM_COLORS = [
+    { name: 'Red', key: 'red', emoji: '🔴', color: '#E35205' },
+    { name: 'Blue', key: 'blue', emoji: '🔵', color: '#0078D2' },
+    { name: 'Gold', key: 'gold', emoji: '🟡', color: '#FFE600' },
+    { name: 'Green', key: 'green', emoji: '🟢', color: '#339966' },
+    { name: 'Purple', key: 'purple', emoji: '🟣', color: '#9966ff' },
+    { name: 'Teal', key: 'teal', emoji: '🩵', color: '#4bc0c0' },
+    { name: 'Orange', key: 'orange', emoji: '🟠', color: '#f97316' },
+    { name: 'Pink', key: 'pink', emoji: '🩷', color: '#ec4899' },
+];
+function getTeamDefinition(teamKey) {
+    return TEAM_COLORS.find(team => team.key === teamKey) || null;
+}
+function getTeamLabel(teamKey, labelMode = currentTeamLabelMode) {
+    const index = TEAM_COLORS.findIndex(team => team.key === teamKey);
+    if (index < 0) return 'No Group';
+    return labelMode === 'colors' ? TEAM_COLORS[index].name : `Group ${index + 1}`;
+}
+function formatTeamLabel(teamKey, labelMode = currentTeamLabelMode) {
+    const team = getTeamDefinition(teamKey);
+    return team ? `${team.emoji} ${getTeamLabel(teamKey, labelMode)}` : '';
+}
+function formatTeamShort(teamKey, labelMode = currentTeamLabelMode) {
+    const team = getTeamDefinition(teamKey);
+    const index = TEAM_COLORS.findIndex(item => item.key === teamKey);
+    if (!team || index < 0) return '';
+    return labelMode === 'colors' ? team.emoji : `${team.emoji} G${index + 1}`;
+}
+
+// Presets
+const eyPresets = [
     {
-        title: "Power BI Foundations",
+        title: "Power BI Fundamentals",
         questions: [
-            { type: "multiple-choice", text: "Which Power BI view is used to create relationships between tables?", options: ["Report view", "Data view", "Model view", "Dashboard view"], correct: 2, timeLimit: 20 },
-            { type: "multiple-choice", text: "Which visual is best for showing a trend over time?", options: ["Card", "Line chart", "Gauge", "Treemap"], correct: 1, timeLimit: 20 },
-            { type: "true-false", text: "A measure is calculated based on the current filter context.", options: ["True", "False"], correct: 0, timeLimit: 15 },
-            { type: "jumbled-prompt", text: "Arrange a typical Power BI workflow:", words: ["Connect to data", "Transform in Power Query", "Build the data model", "Create report visuals"], timeLimit: 30 },
-            { type: "type-answer", text: "Which language is used to create measures in Power BI?", answerText: "DAX", timeLimit: 20 },
-            { type: "number-guess", text: "A KPI target is 100 and the actual value is 75. What is the achievement percentage?", targetNumber: 75, timeLimit: 20 },
-            { type: "speed-math", text: "Complete a measure that totals the Sales column.", equation: "SUM, Sales", timeLimit: 30 }
+            { text: "What is Power BI mainly used for?", options: ["Gaming", "Data visualization", "Video editing", "Social media"], correct: 1, timeLimit: 20 },
+            { text: "Which company created Power BI?", options: ["Google", "Apple", "Microsoft", "Amazon"], correct: 2, timeLimit: 20 },
+            { text: "Which Power BI component is free to download?", options: ["Power BI Desktop", "Power BI Premium", "Azure Portal", "SQL Server"], correct: 0, timeLimit: 20 },
+            { text: "Power BI dashboards can update in:", options: ["Real time", "Once a month", "Once a year", "Offline only"], correct: 0, timeLimit: 20 },
+            { text: "Which feature helps secure data visibility?", options: ["VPN", "Firewall", "Row-Level Security", "Antivirus"], correct: 2, timeLimit: 20 },
+            { text: "Which assistant integrates with Power BI?", options: ["Siri", "Alexa", "Cortana", "Google Assistant"], correct: 2, timeLimit: 20 },
+            { text: "Which Power BI version is cloud-based?", options: ["Power BI Service", "Power BI Paint", "Power BI Desktop", "Power BI Mobile"], correct: 0, timeLimit: 20 },
+            { text: "Power BI Mobile allows users to:", options: ["Access dashboards anywhere", "Edit movies", "Build games", "Repair databases"], correct: 0, timeLimit: 20 }
         ]
     },
     {
-        title: "Data Modeling and DAX",
+        title: "Module 1 - Prepare Your Data",
         questions: [
-            { type: "multiple-choice", text: "Which schema is generally recommended for Power BI models?", options: ["Star schema", "Mesh schema", "Circular schema", "Flat-file schema"], correct: 0, timeLimit: 20 },
-            { type: "true-false", text: "Calculated columns are evaluated during data refresh.", options: ["True", "False"], correct: 0, timeLimit: 15 },
-            { type: "multiple-choice", text: "Which DAX function changes filter context?", options: ["FORMAT", "CALCULATE", "CONCATENATE", "ROUND"], correct: 1, timeLimit: 20 },
-            { type: "type-answer", text: "Which Power BI tool is used to clean and transform data?", answerText: "Power Query", timeLimit: 20 },
-            { type: "poll", text: "Which Power BI skill would help you most?", options: ["Power Query", "Data modeling", "DAX", "Dashboard design"], timeLimit: 20 },
-            { type: "jumbled-prompt", text: "Arrange these modeling tasks:", words: ["Import dimension tables", "Import fact table", "Create relationships", "Hide technical columns"], timeLimit: 30 },
-            { type: "number-guess", text: "A report has 4 pages with 5 visuals each. How many visuals are there?", targetNumber: 20, timeLimit: 20 }
+            { text: "Which tool is used to clean and shape data?", options: ["Paint", "Power Query Editor", "Teams", "Notepad"], correct: 1, timeLimit: 20 },
+            { text: "Which connection mode gives real-time updates?", options: ["Import", "Direct", "Offline", "Static"], correct: 1, timeLimit: 20 },
+            { text: "Which connection mode stores a copy of the data?", options: ["Direct", "Import", "Live", "Shared"], correct: 1, timeLimit: 20 },
+            { text: "Removing columns is an example of:", options: ["Data shaping", "Coding", "Publishing", "Security"], correct: 0, timeLimit: 20 },
+            { text: "Can Power BI combine data from multiple tables?", options: ["Yes", "No", "N/A", "N/A"], correct: 0, timeLimit: 20 },
+            { text: "Which language is used in Power Query?", options: ["Python", "Java", "M Language", "HTML"], correct: 2, timeLimit: 20 },
+            { text: "Which option combines tables together?", options: ["Merge/Append Queries", "Delete Query", "Export Query", "Refresh Query"], correct: 0, timeLimit: 20 },
+            { text: "Does shaping data affect the original source?", options: ["Yes", "No", "N/A", "N/A"], correct: 1, timeLimit: 20 }
+        ]
+    },
+    {
+        title: "Module 2 - Data Modeling",
+        questions: [
+            { text: "What does DAX stand for?", options: ["Data Analysis Expressions", "Data Access XML", "Digital Analytics System", "Dynamic Azure Exchange"], correct: 0, timeLimit: 20 },
+            { text: "Which DAX function adds values together?", options: ["COUNT", "IF", "SUM", "MAX"], correct: 2, timeLimit: 20 },
+            { text: "Which function counts unique values?", options: ["COUNT", "DISTINCTCOUNT", "SUM", "MIN"], correct: 1, timeLimit: 20 },
+            { text: "Relationships connect:", options: ["Two tables", "Two emails", "Two reports", "Two dashboards"], correct: 0, timeLimit: 20 },
+            { text: "Power BI can auto-detect relationships.", options: ["True", "False", "N/A", "N/A"], correct: 0, timeLimit: 20 },
+            { text: "Which relationship type should usually be avoided?", options: ["One-to-One", "One-to-Many", "Many-to-Many", "Active"], correct: 2, timeLimit: 20 },
+            { text: "Measures are mainly used for:", options: ["Calculations", "Printing", "Formatting slides", "Security"], correct: 0, timeLimit: 20 },
+            { text: "Calculated columns are created using:", options: ["DAX formulas", "VBA only", "SQL Server", "PowerPoint"], correct: 0, timeLimit: 20 }
+        ]
+    },
+    {
+        title: "Module 3 - Data Visualization",
+        questions: [
+            { text: "Charts and graphs are examples of:", options: ["Visualizations", "Databases", "Security tools", "Servers"], correct: 0, timeLimit: 20 },
+            { text: "Which chart is best for showing trends over time?", options: ["Donut chart", "Funnel chart", "Line chart", "Gauge chart"], correct: 2, timeLimit: 20 },
+            { text: "Which visual looks like a speedometer?", options: ["Table", "Gauge chart", "Pie chart", "Tree map"], correct: 1, timeLimit: 20 },
+            { text: "What is a slicer mainly used for?", options: ["Filtering data", "Printing reports", "Deleting visuals", "Coding"], correct: 0, timeLimit: 20 },
+            { text: "Reports can be published to:", options: ["Workspace", "Paint", "BIOS", "Command Prompt"], correct: 0, timeLimit: 20 },
+            { text: "Which of these is a Power BI visual?", options: ["KPI chart", "Word document", "PDF editor", "Browser tab"], correct: 0, timeLimit: 20 },
+            { text: "Custom visuals can come from:", options: ["Microsoft and community creators", "Only Microsoft", "Only Google", "Nobody"], correct: 0, timeLimit: 20 },
+            { text: "Data visualization helps users understand:", options: ["Trends and patterns", "Hardware repairs", "Coding syntax", "Network cables"], correct: 0, timeLimit: 20 }
+        ]
+    },
+    {
+        title: "Quick Functionality Test",
+        questions: [
+            { text: "Is the Host's Pause Timer working right now?", options: ["Yes, I'll pause it!", "No, it's broken", "What is a timer?", "I don't know"], correct: 0, timeLimit: 30 },
+            { text: "Will the leaderboard show up after this question?", options: ["Yes, always", "Only at the end", "I hope so", "No"], correct: 0, timeLimit: 15 },
+            { text: "Are you ready to test the live emojis on the final screen?", options: ["Absolutely!", "Let's go!", "Bring on the emojis", "All of the above"], correct: 3, timeLimit: 15 }
         ]
     }
 ];
 
-let powerBiPresets = [];
-try {
-    const saved = localStorage.getItem("powerbi_custom_quizzes");
-    if (saved) {
-        powerBiPresets = JSON.parse(saved);
-    } else {
-        powerBiPresets = defaultPresets;
-        localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
+const vbaCopilotPresets = [
+    {
+        title: "VBA Automation Challenge",
+        subject: "vba",
+        questions: [
+            { subject: "vba", type: "multiple-choice", text: "Which keyword declares a variable in VBA?", options: ["Let", "Dim", "Var", "ConstOnly"], correct: 1, timeLimit: 20 },
+            { subject: "vba", type: "true-false", text: "Option Explicit helps catch undeclared variables.", options: ["True", "False"], correct: 0, timeLimit: 15 },
+            { subject: "vba", type: "jumbled-prompt", text: "Arrange this simple VBA procedure.", words: ["Sub ShowMessage()", "MsgBox \"Hello\"", "End Sub"], timeLimit: 30 },
+            { subject: "vba", type: "type-answer", text: "Which VBA statement displays a message box?", answerText: "MsgBox", timeLimit: 20 },
+            { subject: "vba", type: "number-guess", text: "How many times does For i = 1 To 5 execute?", targetNumber: 5, min: 0, max: 10, timeLimit: 20 },
+            { subject: "vba", type: "poll", text: "Which VBA skill should we practise next?", options: ["Loops", "Worksheets", "UserForms", "Error handling"], timeLimit: 20 },
+            { subject: "vba", type: "speed-math", text: "Complete the key parts of a loop that runs from 1 to 10.", equation: "For, To, Next", timeLimit: 30 }
+        ]
+    },
+    {
+        title: "Microsoft Copilot Challenge",
+        subject: "copilot",
+        questions: [
+            { subject: "copilot", type: "multiple-choice", text: "Which prompt gives Copilot the clearest output format?", options: ["Help me", "Summarize this", "Summarize this report in 3 bullets for executives", "Do something useful"], correct: 2, timeLimit: 20 },
+            { subject: "copilot", type: "true-false", text: "Important Copilot responses should still be reviewed by a person.", options: ["True", "False"], correct: 0, timeLimit: 15 },
+            { subject: "copilot", type: "jumbled-prompt", text: "Build a well-structured email prompt.", words: ["Draft an email", "to the project team", "summarizing the delay", "in a calm professional tone"], timeLimit: 30 },
+            { subject: "copilot", type: "type-answer", text: "What do we call a confident but invented AI response?", answerText: "Hallucination", timeLimit: 20 },
+            { subject: "copilot", type: "number-guess", text: "How many requested bullet points are in: 'Summarize this in 4 bullets'?", targetNumber: 4, min: 0, max: 10, timeLimit: 20 },
+            { subject: "copilot", type: "poll", text: "Where would Copilot save you the most time?", options: ["Email", "Meetings", "Documents", "Data analysis"], timeLimit: 20 },
+            { subject: "copilot", type: "speed-math", text: "Enter the three required prompt elements.", equation: "Goal, Context, Format", timeLimit: 30 }
+        ]
     }
-} catch (e) {
-    powerBiPresets = defaultPresets;
-}
+];
 
-const THEME_COLORS = {
-    primary: "#F2C811",
-    purple: "#8A6D00",
-    blue: "#5B8DEF",
-    darkBlue: "#2B2B2B"
+const RANDOM_QUESTION_BANK = {
+    powerbi: {
+        "multiple-choice": [
+            { text: "Which Power BI visual is best for a trend over time?", options: ["Card", "Line chart", "Gauge", "Table"], correct: 1 },
+            { text: "Which language creates measures in Power BI?", options: ["DAX", "VBA", "HTML", "CSS"], correct: 0 }
+        ],
+        "true-false": [{ text: "A measure is evaluated in filter context.", options: ["True", "False"], correct: 0 }],
+        "jumbled-prompt": [{ text: "Arrange the Power BI workflow.", words: ["Connect", "Transform", "Model", "Visualize"] }],
+        "type-answer": [{ text: "Which tool cleans and transforms data?", answerText: "Power Query" }],
+        "number-guess": [{ text: "Four pages contain five visuals each. How many visuals?", targetNumber: 20, min: 0, max: 30 }],
+        "poll": [{ text: "Which topic needs more practice?", options: ["Power Query", "Modeling", "DAX", "Design"] }],
+        "speed-math": [{ text: "Enter the required elements for a total-sales measure.", equation: "SUM, Sales" }]
+    },
+    vba: {},
+    copilot: {}
 };
+RANDOM_QUESTION_BANK.vba = Object.fromEntries(vbaCopilotPresets[0].questions.map(q => [q.type, [q]]));
+RANDOM_QUESTION_BANK.copilot = Object.fromEntries(vbaCopilotPresets[1].questions.map(q => [q.type, [q]]));
 
-const DEFAULT_APP_TITLE = "Digiversity 2026 Power BI";
-const DEFAULT_APP_SUBTITLE = "Model. Visualize. Analyze. Compete.";
-const ADMIN_PASSWORD = "eypowerbi2026";
-const ADMIN_SESSION_KEY = "powerbi_instructor_authenticated";
-const SESSION_ROOT = "powerbiSessions";
-const LEGACY_QUIZ_PACK_URL = "./data/legacy-powerbi-quizzes.json";
-let currentAppTitle = DEFAULT_APP_TITLE;
-let currentAppSubtitle = DEFAULT_APP_SUBTITLE;
-try {
-    currentAppTitle = localStorage.getItem("powerbi_app_title") || DEFAULT_APP_TITLE;
-    currentAppSubtitle = localStorage.getItem("powerbi_app_subtitle") || DEFAULT_APP_SUBTITLE;
-} catch (e) {}
-
-// Global State
-let editingQuizIndex = null;
-let gameSessionRef = null;
-let currentSessionPin = null;
-let currentRole = null;
-let myPlayerKey = null;
-let myNickname = "";
-let currentQuizData = null;
-
-// Host tracking configurations
-let timerInterval = null;
-let timeLeft = 0;
-let hostActiveQuestionIndex = 0;
-let hostAnswersMap = {};
-let isTimerPaused = false;
-let sessionTotalAnswersCount = 0;
-let sessionTotalCorrectAnswersCount = 0;
-
-// Player data tracking
-let hasAnsweredCurrent = false;
-let playerActiveQuestionIndex = -1;
-let currentQuestionStartTime = 0;
-let currentScore = 0;
-let currentStreak = 0;
-let previousRank = null;
-let playerClientId = null;
-let playerConnectionId = null;
-let questionConclusionInProgress = false;
-
-// Synchronization handles
-let sessionStateListener = null;
-let playerRecordListener = null;
-let playerLobbyListener = null;
-let answersListener = null;
-let emojiListener = null;
-let emojiCooldownActive = false;
-
-const views = {
-    landing: document.getElementById("view-landing"),
-    adminLogin: document.getElementById("view-admin-login"),
-    playerJoin: document.getElementById("view-player-join"),
-    playerLobby: document.getElementById("view-player-lobby"),
-    playerQuestion: document.getElementById("view-player-question"),
-    playerResult: document.getElementById("view-player-result"),
-    playerLeaderboard: document.getElementById("view-player-leaderboard"),
-    hostSetup: document.getElementById("view-host-setup"),
-    adminMaker: document.getElementById("view-admin-maker"),
-    hostLobby: document.getElementById("view-host-lobby"),
-    hostQuestion: document.getElementById("view-host-question"),
-    hostResults: document.getElementById("view-host-results"),
-    hostLeaderboard: document.getElementById("view-host-leaderboard")
+const DEFAULT_BRANDING = {
+    eventBadge: '🎉 ICEBREAKER 🎉',
+    titleLine1: 'Digiversity',
+    titleLine2: '2026',
+    subtitle: 'The Ultimate Data Challenge',
+    supportingText: 'Dashboard Battles • Team Wars • Awarding Night',
+    joinLabel: '🎮 Join Game',
+    hostLabel: '🎤 Host Game'
 };
+let currentBranding = { ...DEFAULT_BRANDING };
+const AVAILABLE_THEMES = new Set(['ey', 'ocean', 'aurora', 'sunset']);
+let currentTheme = 'ey';
 
-const sfx = {
-    tick: document.getElementById("sfx-tick"),
-    ding: document.getElementById("sfx-ding"),
-    powerup: document.getElementById("sfx-powerup")
-};
-
-// ==========================================
-// 2. VIEW NAVIGATION SYSTEM
-// ==========================================
-function switchView(targetKey) {
-    Object.keys(views).forEach(key => {
-        if (views[key]) views[key].classList.remove("active");
-    });
-    if (views[targetKey]) {
-        views[targetKey].classList.add("active");
-        console.log(`Switched layout to view state: ${targetKey}`);
-    } else {
-        console.error(`Target view layout mapping failed for: ${targetKey}`);
-    }
+function applyTheme(theme) {
+    currentTheme = AVAILABLE_THEMES.has(theme) ? theme : 'ey';
+    document.documentElement.dataset.theme = currentTheme;
+    const selector = document.getElementById('branding-theme');
+    if (selector) selector.value = currentTheme;
 }
 
-function unsubscribeActiveListeners() {
-    if (sessionStateListener) { sessionStateListener(); sessionStateListener = null; }
-    if (playerRecordListener) { playerRecordListener(); playerRecordListener = null; }
-    if (playerLobbyListener) { playerLobbyListener(); playerLobbyListener = null; }
-    if (answersListener) { answersListener(); answersListener = null; }
-    if (emojiListener) { emojiListener(); emojiListener = null; }
-}
-
-function clearPlayerSessionStorage() {
-    playerActiveQuestionIndex = -1;
-    sessionStorage.removeItem("powerbi_player_session_pin");
-    sessionStorage.removeItem("powerbi_player_nickname");
-    sessionStorage.removeItem("powerbi_player_key");
-    sessionStorage.removeItem("powerbi_player_role");
-}
-
-function clearHostSessionStorage() {
-    sessionStorage.removeItem("powerbi_host_session_pin");
-    sessionStorage.removeItem("powerbi_host_role");
-    sessionStorage.removeItem("powerbi_host_quiz");
-}
-
-function purgeActiveListeners() {
-    unsubscribeActiveListeners();
-    clearPlayerSessionStorage();
-    clearHostSessionStorage();
-}
-
-// ==========================================
-// 3. CORE INITIALIZATION PIPELINE
-// ==========================================
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("Power BI Challenge operational system running successfully...");
-    initializeBrandingSettings();
-
-    if (!isFirebaseEnabled) {
-        const warningModal = document.getElementById("firebase-warning-modal");
-        if (warningModal) warningModal.classList.remove("hidden");
-        document.getElementById("btn-dismiss-firebase")?.addEventListener("click", () => {
-            warningModal.classList.add("hidden");
-        });
-    }
-
-    // Attach Interactivity Routes
-    document.getElementById("btn-goto-join")?.addEventListener("click", () => switchView("playerJoin"));
-    document.getElementById("btn-goto-login")?.addEventListener("click", () => {
-        if (sessionStorage.getItem(ADMIN_SESSION_KEY) === "true") {
-            enterHostDashboard();
-        } else {
-            switchView("adminLogin");
+async function loadTheme() {
+    const localTheme = localStorage.getItem('dashboard_wars_theme');
+    if (localTheme) applyTheme(localTheme);
+    if (!isFirebaseEnabled) return;
+    try {
+        const snapshot = await get(ref(database, 'settings/dashboardWarsTheme'));
+        if (snapshot.exists()) {
+            applyTheme(snapshot.val());
+            localStorage.setItem('dashboard_wars_theme', currentTheme);
         }
-    });
-
-    document.getElementById("btn-back-landing-login")?.addEventListener("click", () => switchView("landing"));
-    document.getElementById("btn-back-landing-player")?.addEventListener("click", () => switchView("landing"));
-    document.getElementById("btn-back-landing-host")?.addEventListener("click", () => {
-        switchView("landing");
-    });
-
-    setupInstructorLoginWorkflow();
-    setupHostManagementWorkflow();
-    setupPlayerParticipationWorkflow();
-    recoverPlayerSession();
-});
-
-// ==========================================
-// 4. ADMINISTRATIVE WORKFLOW SYSTEMS
-// ==========================================
-function setupInstructorLoginWorkflow() {
-    const loginForm = document.getElementById("form-admin-login");
-    loginForm?.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const pwdInput = document.getElementById("input-admin-password");
-        const submitBtn = document.getElementById("btn-admin-login");
-        const password = pwdInput.value;
-
-        if (password !== ADMIN_PASSWORD) {
-            alert("Administrative connection verification credentials failed.");
-            return;
-        }
-
-        submitBtn.disabled = true;
-        try {
-            sessionStorage.setItem(ADMIN_SESSION_KEY, "true");
-            pwdInput.value = "";
-            await enterHostDashboard();
-        } finally {
-            submitBtn.disabled = false;
-        }
-    });
-
-    document.getElementById("btn-admin-logout")?.addEventListener("click", () => {
-        purgeActiveListeners();
-        sessionStorage.removeItem(ADMIN_SESSION_KEY);
-        switchView("landing");
-    });
-}
-
-function applyAppTitle(title) {
-    const cleanTitle = (title || "").trim() || DEFAULT_APP_TITLE;
-    currentAppTitle = cleanTitle;
-    document.title = cleanTitle;
-
-    const titleDisplay = document.getElementById("app-title-display");
-    if (titleDisplay) {
-        const parts = cleanTitle.split(/\s+/);
-        const accent = parts.length >= 2 && parts.slice(-2).join(" ").toLowerCase() === "power bi"
-            ? parts.splice(-2).join(" ")
-            : (parts.pop() || "Power BI");
-        titleDisplay.replaceChildren(
-            document.createTextNode(parts.length ? `${parts.join(" ")} ` : ""),
-            Object.assign(document.createElement("span"), { textContent: accent })
-        );
+    } catch (error) {
+        console.warn('Shared theme could not be loaded:', error);
     }
-
-    const titleInput = document.getElementById("input-app-title");
-    if (titleInput && document.activeElement !== titleInput) titleInput.value = cleanTitle;
 }
 
-function applyAppSubtitle(subtitle) {
-    const cleanSubtitle = (subtitle || "").trim() || DEFAULT_APP_SUBTITLE;
-    currentAppSubtitle = cleanSubtitle;
-
-    const subtitleDisplay = document.getElementById("app-subtitle-display");
-    const subtitleSpacer = document.getElementById("app-subtitle-spacer");
-    if (subtitleDisplay) subtitleDisplay.textContent = cleanSubtitle;
-    if (subtitleSpacer) subtitleSpacer.textContent = cleanSubtitle;
-
-    const subtitleInput = document.getElementById("input-app-subtitle");
-    if (subtitleInput && document.activeElement !== subtitleInput) subtitleInput.value = cleanSubtitle;
+function normalizeBranding(value = {}) {
+    const next = {};
+    Object.keys(DEFAULT_BRANDING).forEach(key => {
+        const candidate = String(value[key] ?? '').trim();
+        next[key] = candidate || DEFAULT_BRANDING[key];
+    });
+    return next;
 }
 
-function initializeBrandingSettings() {
-    applyAppTitle(currentAppTitle);
-    applyAppSubtitle(currentAppSubtitle);
-
-    if (isFirebaseEnabled) {
-        onValue(ref(database, "settings/powerbi/appTitle"), (snapshot) => {
-            if (!snapshot.exists()) return;
-            const sharedTitle = String(snapshot.val() || "").trim();
-            if (!sharedTitle) return;
-            localStorage.setItem("powerbi_app_title", sharedTitle);
-            applyAppTitle(sharedTitle);
-        });
-
-        onValue(ref(database, "settings/powerbi/appSubtitle"), (snapshot) => {
-            if (!snapshot.exists()) return;
-            const sharedSubtitle = String(snapshot.val() || "").trim();
-            if (!sharedSubtitle) return;
-            localStorage.setItem("powerbi_app_subtitle", sharedSubtitle);
-            applyAppSubtitle(sharedSubtitle);
-        });
-    }
-
-    document.getElementById("btn-save-branding")?.addEventListener("click", async () => {
-        const titleInput = document.getElementById("input-app-title");
-        const subtitleInput = document.getElementById("input-app-subtitle");
-        const nextTitle = titleInput?.value.trim() || DEFAULT_APP_TITLE;
-        const nextSubtitle = subtitleInput?.value.trim() || DEFAULT_APP_SUBTITLE;
-        localStorage.setItem("powerbi_app_title", nextTitle);
-        localStorage.setItem("powerbi_app_subtitle", nextSubtitle);
-        applyAppTitle(nextTitle);
-        applyAppSubtitle(nextSubtitle);
-
-        if (isFirebaseEnabled) {
-            try {
-                await update(ref(database, "settings/powerbi"), {
-                    appTitle: nextTitle,
-                    appSubtitle: nextSubtitle
-                });
-            } catch (err) {
-                console.warn("Shared branding sync failed:", err);
-            }
-        }
-
-        const button = document.getElementById("btn-save-branding");
-        const originalText = button.innerText;
-        button.innerText = "Saved";
-        setTimeout(() => { button.innerText = originalText; }, 1000);
+function applyBranding(value) {
+    currentBranding = normalizeBranding(value);
+    const mappings = {
+        'landing-event-badge': currentBranding.eventBadge,
+        'landing-title-line-1': currentBranding.titleLine1,
+        'landing-title-line-2': currentBranding.titleLine2,
+        'landing-subtitle': currentBranding.subtitle,
+        'landing-supporting-text': currentBranding.supportingText,
+        'landing-join-label': currentBranding.joinLabel,
+        'landing-host-label': currentBranding.hostLabel
+    };
+    Object.entries(mappings).forEach(([id, text]) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = text;
+    });
+    document.title = `${currentBranding.titleLine1} ${currentBranding.titleLine2}`.trim();
+    const inputMappings = {
+        'branding-event-badge': currentBranding.eventBadge,
+        'branding-title-line-1': currentBranding.titleLine1,
+        'branding-title-line-2': currentBranding.titleLine2,
+        'branding-subtitle': currentBranding.subtitle,
+        'branding-supporting-text': currentBranding.supportingText,
+        'branding-join-label': currentBranding.joinLabel,
+        'branding-host-label': currentBranding.hostLabel
+    };
+    Object.entries(inputMappings).forEach(([id, text]) => {
+        const input = document.getElementById(id);
+        if (input) input.value = text;
     });
 }
 
-// ============================================
-// QUESTION MAKER - PREMIUM BUILDER SYSTEM
-// ============================================
-const GAME_TYPE_META = {
-    "multiple-choice": { label: "Visual Match", icon: "📊", color: "#F2C811" },
-    "true-false":      { label: "BI Verdict", icon: "✅", color: "#8A6D00" },
-    "jumbled-prompt":  { label: "Process Order", icon: "🔀", color: "#5B8DEF" },
-    "type-answer":     { label: "DAX Answer", icon: "ƒx", color: "#a855f7" },
-    "number-guess":    { label: "KPI Estimate", icon: "🎯", color: "#f97316" },
-    "poll":            { label: "Analyst Poll", icon: "📈", color: "#22c55e" },
-    "speed-math":      { label: "Missing DAX", icon: "ƒx", color: "#FFD700" },
-};
-
-const SAMPLE_DATA = {
-    "multiple-choice": [
-        { text: "Which visual best compares categories?", options: ["Bar chart", "Card", "Gauge", "Map"], correct: 0 },
-        { text: "Which view manages table relationships?", options: ["Report", "Model", "Data", "Dashboard"], correct: 1 }
-    ],
-    "true-false": [
-        { text: "Measures respond to filter context.", correct: 0 },
-        { text: "A dashboard can contain multiple pages.", correct: 1 }
-    ],
-    "jumbled-prompt": [
-        { text: "Arrange the report workflow:", words: ["Connect", "Transform", "Model", "Visualize"] },
-        { text: "Arrange model development:", words: ["Load dimensions", "Load facts", "Create relationships", "Create measures"] }
-    ],
-    "type-answer": [
-        { text: "Which DAX function changes filter context?", answerText: "CALCULATE" },
-        { text: "Which tool transforms data before loading?", answerText: "Power Query" }
-    ],
-    "number-guess": [
-        { text: "Actual is 80 against a target of 100. What percentage was achieved?", targetNumber: 80 },
-        { text: "A report has 6 pages with 5 visuals each. How many visuals?", targetNumber: 30 }
-    ],
-    "poll": [
-        { text: "Which Power BI topic needs more practice?", options: ["Power Query", "Modeling", "DAX", "Design"] },
-        { text: "How confident are you building reports?", options: ["Very confident", "Somewhat confident", "Still learning", "Brand new"] }
-    ],
-    "speed-math": [
-        { text: "Complete a measure that totals Sales[Amount].", equation: "SUM, Sales, Amount" },
-        { text: "Complete a measure that counts rows in Customers.", equation: "COUNTROWS, Customers" }
-    ]
-};
-
-function updateMakerCount() {
-    const count = document.querySelectorAll(".maker-q-block").length;
-    const el = document.getElementById("maker-q-count");
-    if (el) el.innerText = count === 0 ? "0 questions added" : `${count} question${count !== 1 ? "s" : ""} added`;
-    const emptyState = document.getElementById("maker-empty-state");
-    if (emptyState) emptyState.style.display = count === 0 ? "flex" : "none";
+async function loadBranding() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('dashboard_wars_branding') || 'null'); } catch {}
+    if (saved) applyBranding(saved);
+    if (!isFirebaseEnabled) return;
+    try {
+        const snapshot = await get(ref(database, 'settings/dashboardWarsBranding'));
+        if (snapshot.exists()) {
+            applyBranding(snapshot.val());
+            localStorage.setItem('dashboard_wars_branding', JSON.stringify(currentBranding));
+        }
+    } catch (error) {
+        console.warn('Shared branding could not be loaded:', error);
+    }
 }
 
-function buildMakerBlock(typeSelect) {
-    const meta = GAME_TYPE_META[typeSelect] || { label: typeSelect, icon: "❓", color: "white" };
-    const qBlock = document.createElement("div");
-    qBlock.className = "maker-q-block fade-in-up";
-    qBlock.setAttribute("data-qtype", typeSelect);
-    const radioGroup = "mc_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
+function normalizeQuestionType(q) {
+    if (q.dashboardData || q.type === 'dashboard') return 'dashboard';
+    if (!q.type || q.type === 'text') return 'multiple-choice';
+    return q.type;
+}
 
-    let html = `
-        <div class="maker-q-header" style="border-left: 4px solid ${meta.color}">
-            <span style="display:flex;align-items:center;gap:0.6rem">
-                <span style="font-size:1.4rem">${meta.icon}</span>
-                <strong style="color:${meta.color};font-size:1rem">${meta.label}</strong>
-            </span>
-            <div style="display:flex; gap:0.5rem">
-                <button class="btn btn-secondary maker-up-btn" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; border-radius: var(--radius-sm); cursor: pointer;" title="Move Up">↑</button>
-                <button class="btn btn-secondary maker-down-btn" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; border-radius: var(--radius-sm); cursor: pointer;" title="Move Down">↓</button>
-                <button class="btn btn-secondary maker-sample-btn" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; border-radius: var(--radius-sm); cursor: pointer;" title="Generate Sample Data">🎲</button>
-                <button class="btn btn-secondary maker-preview-btn" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; border-radius: var(--radius-sm); cursor: pointer;">👁️ Preview</button>
-                <button class="maker-remove-btn">✕ Remove</button>
-            </div>
-        </div>
-        <div class="maker-q-field">
-            <label class="maker-q-label">Question Text</label>
-            <textarea class="maker-q-text" rows="2" placeholder="Write your question here..."></textarea>
-        </div>`;
+function questionSubject(q) {
+    const raw = q?.subject || 'powerbi';
+    return raw === 'vba' ? 'VBA' : raw === 'copilot' ? 'Microsoft Copilot' : raw === 'mixed' ? 'Mixed Challenge' : 'Power BI';
+}
 
-    if (typeSelect === "multiple-choice") {
-        html += `
-            <div class="maker-options-grid">
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="0" checked><input type="text" class="maker-q-opt" placeholder="Option A..."></div>
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="1"><input type="text" class="maker-q-opt" placeholder="Option B..."></div>
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="2"><input type="text" class="maker-q-opt" placeholder="Option C... (optional)"></div>
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="3"><input type="text" class="maker-q-opt" placeholder="Option D... (optional)"></div>
-            </div>
-            <div class="maker-q-hint">🔘 Select the radio button next to the <strong style="color:#22c55e">correct answer</strong>.</div>`;
-    } else if (typeSelect === "true-false") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #8A6D00; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> Players decide whether a Power BI statement or modeling claim is true or false.
-            </div>
-            <div class="maker-options-list">
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="0" checked><label>Valid / True</label></div>
-                <div class="maker-q-field maker-opt-row"><input type="radio" name="${radioGroup}" class="maker-q-correct" value="1"><label>Invalid / False</label></div>
-            </div>`;
-    } else if (typeSelect === "jumbled-prompt") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #5B8DEF; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> Players arrange Power BI workflow steps in the correct order. Enter the steps below in the <strong>correct order</strong>, separated by commas.
-            </div>
-            <div class="maker-q-field"><label class="maker-q-label">🔀 Steps in Correct Order <span class="text-muted">(comma-separated)</span></label><input type="text" class="maker-q-words" placeholder="e.g. Connect, Transform, Model, Visualize"></div>`;
-    } else if (typeSelect === "type-answer") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #a855f7; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> Players enter the exact DAX function, Power BI term, or result. Matching is case-insensitive.
-            </div>
-            <div class="maker-q-field"><label class="maker-q-label">✅ Expected Answer <span class="text-muted">(case-insensitive)</span></label><input type="text" class="maker-q-answer" placeholder="e.g. CALCULATE"></div>`;
-    } else if (typeSelect === "number-guess") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #f97316; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> Players estimate a numeric KPI, percentage, or measure result.
-            </div>
-            <div class="maker-q-field"><label class="maker-q-label">🎯 Correct Value <span class="text-muted">(0 to 100)</span></label><input type="number" class="maker-q-number" min="0" max="100" step="1" placeholder="e.g. 42"></div>`;
-    } else if (typeSelect === "poll") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #22c55e; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> No right or wrong answers. Players vote on an option, and the host screen shows a live bar chart of the group's consensus. No points are awarded.
-            </div>
-            <div class="maker-q-field"><label class="maker-q-label">Poll Options <span class="text-muted">(comma-separated)</span></label><input type="text" class="maker-q-poll-opts" placeholder="e.g. Daily, Weekly, Monthly, Never"></div>`;
-    } else if (typeSelect === "speed-math") {
-        html += `
-            <div class="maker-q-guide" style="background: rgba(255,255,255,0.05); border-left: 3px solid #FFD700; padding: 0.75rem; margin-bottom: 1rem; border-radius: 0 4px 4px 0; font-size: 0.85rem; color: #cbd5e1;">
-                <strong>💡 How it works:</strong> Players complete a missing DAX expression. Their response must contain every required element; concise answers score higher.
-            </div>
-            <div class="maker-q-field"><label class="maker-q-label">🔑 Required DAX Elements <span class="text-muted">(comma-separated)</span></label><input type="text" class="maker-q-math-eq" placeholder="e.g. CALCULATE, SUM, Sales"></div>`;
+function getCorrectAnswerText(q) {
+    const type = normalizeQuestionType(q);
+    if (type === 'dashboard') {
+        const idx = q.dashboardData?.correctIndex ?? q.correctIndex;
+        return q.dashboardData?.labels?.[idx] ?? '';
     }
+    if (type === 'jumbled-prompt') return (q.words || []).join(' → ');
+    if (type === 'type-answer') return q.answerText || '';
+    if (type === 'number-guess') return String(q.targetNumber ?? '');
+    if (type === 'speed-math') return `Required: ${q.equation || ''}`;
+    if (type === 'poll') return 'Opinion recorded';
+    return q.options?.[q.correct] || '';
+}
 
-    html += `
-        <div class="maker-q-field mt-3">
-            <label class="maker-q-label">🖼️ Optional Question Image</label>
-            <div class="flex items-center gap-2" style="margin-top: 0.25rem;">
-                <input type="file" class="maker-q-image-file" accept="image/*" style="display: none;">
-                <button type="button" class="btn btn-secondary btn-upload-img-btn" style="padding: 0.4rem 0.8rem; font-size: 0.9rem; border-radius: var(--radius-md);">Upload Image</button>
-                <span class="maker-q-img-name text-muted text-small" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">No file selected</span>
-                <button type="button" class="btn btn-danger btn-clear-img-btn hidden" style="padding: 0.4rem 0.8rem; font-size: 0.9rem; background: #ef4444; border: none; border-radius: var(--radius-md); color: white; cursor: pointer;">Remove</button>
-            </div>
-            <div class="maker-q-img-preview-container mt-2 hidden" style="max-width: 120px; border: 1px solid var(--glass-border); border-radius: var(--radius-md); overflow: hidden;">
-                <img class="maker-q-img-preview" src="" style="width: 100%; display: block;">
-            </div>
-        </div>
-    `;
+function isResponseCorrect(q, response) {
+    const type = normalizeQuestionType(q);
+    if (type === 'poll') return true;
+    if (type === 'jumbled-prompt') {
+        return Array.isArray(response.sequence) &&
+            response.sequence.join('\u0001') === (q.words || []).join('\u0001');
+    }
+    if (type === 'type-answer') {
+        return String(response.textAnswer || '').trim().toLowerCase() === String(q.answerText || '').trim().toLowerCase();
+    }
+    if (type === 'speed-math') {
+        const answer = String(response.textAnswer || '').toLowerCase();
+        return String(q.equation || '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean)
+            .every(keyword => answer.includes(keyword));
+    }
+    if (type === 'number-guess') {
+        return Math.abs(Number(response.numberAnswer) - Number(q.targetNumber)) <= (q.tolerance ?? 0.15);
+    }
+    return Number(response.optionIndex) === Number(q.correct);
+}
 
-    html += `<div class="maker-q-field" style="max-width:200px; margin-top: 1rem;"><label class="maker-q-label">⏱ Time Limit (seconds)</label><input type="number" class="maker-q-time" value="20" min="5" max="120"></div>`;
-    qBlock.innerHTML = html;
-
-    const fileInput = qBlock.querySelector(".maker-q-image-file");
-    const uploadBtn = qBlock.querySelector(".btn-upload-img-btn");
-    const clearBtn = qBlock.querySelector(".btn-clear-img-btn");
-    const nameSpan = qBlock.querySelector(".maker-q-img-name");
-    const previewContainer = qBlock.querySelector(".maker-q-img-preview-container");
-    const previewImg = qBlock.querySelector(".maker-q-img-preview");
-
-    uploadBtn.addEventListener("click", () => fileInput.click());
-
-    fileInput.addEventListener("change", (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-
-        nameSpan.innerText = file.name;
-        clearBtn.classList.remove("hidden");
-
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-            const base64Image = evt.target.result;
-            previewImg.src = base64Image;
-            previewContainer.classList.remove("hidden");
-            qBlock.setAttribute("data-image", base64Image);
+async function submitPlayerResponse(response) {
+    if (!currentGamePin || !myPlayerId || hasAnsweredThisRound || currentGameState !== 'question') return false;
+    hasAnsweredThisRound = true;
+    const sessionRef = ref(database, `sessions/${currentGamePin}`);
+    let sessionSnap;
+    try {
+        sessionSnap = await get(sessionRef);
+    } catch (error) {
+        hasAnsweredThisRound = false;
+        showToast('Could not submit. Check your connection and try again.');
+        return false;
+    }
+    if (!sessionSnap.exists()) { hasAnsweredThisRound = false; return false; }
+    const session = sessionSnap.val();
+    if (session.state !== 'question' || session.currentQuestionIndex !== currentQuestionIndex || session.isPaused) {
+        hasAnsweredThisRound = false;
+        showToast(session.isPaused ? 'The host paused the game.' : 'That question has already closed.');
+        return false;
+    }
+    const q = session.questions?.[currentQuestionIndex] || questions[currentQuestionIndex];
+    const isPoll = normalizeQuestionType(q) === 'poll';
+    const isCorrect = isResponseCorrect(q, response);
+    const elapsed = Math.max(0, (Date.now() - session.questionStartTime) / 1000);
+    const playerRef = ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`);
+    let awardedPoints = 0;
+    let claim;
+    try {
+        claim = await runTransaction(playerRef, player => {
+        if (!player || player.answeredQuestionIndex === currentQuestionIndex) return;
+        let streak = player.streak || 0;
+        let base = 0, speed = 0, streakBonus = 0;
+        if (isCorrect && !isPoll) {
+            base = 500;
+            speed = Math.floor(Math.max(0, 500 * (1 - elapsed / (q.timeLimit || 20))));
+            streak += 1;
+            if (streak >= 3) streakBonus = Math.floor((base + speed) * 0.2);
+            awardedPoints = base + speed + streakBonus;
+            if (q.isDoublePoints) awardedPoints *= 2;
+            if (player.speedBoostActive) awardedPoints = Math.floor(awardedPoints * 1.5);
+            if (player.multiplierActive) awardedPoints *= 2;
+        } else if (!isPoll) {
+            streak = 0;
+        }
+        return {
+            ...player,
+            score: (player.score || 0) + awardedPoints,
+            streak,
+            hasAnswered: true,
+            answeredQuestionIndex: currentQuestionIndex,
+            lastAnswerCorrect: isCorrect,
+            lastPointsEarned: awardedPoints,
+            isStreakMultiplierActive: isCorrect && streak >= 3,
+            inventory: awardRandomPowerupIfDeserving(isCorrect && !isPoll, streak, elapsed, player.inventory || []),
+            speedBoostActive: false,
+            multiplierActive: false,
+            receiptBase: base,
+            receiptSpeed: speed,
+            receiptStreak: streakBonus,
+            receiptDouble: Boolean(q.isDoublePoints)
         };
-        reader.readAsDataURL(file);
-    });
+        });
+    } catch (error) {
+        hasAnsweredThisRound = false;
+        showToast('Could not lock in your answer. Please try again.');
+        return false;
+    }
+    if (!claim.committed) return false;
 
-    clearBtn.addEventListener("click", () => {
-        fileInput.value = "";
-        nameSpan.innerText = "No file selected";
-        clearBtn.classList.add("hidden");
-        previewContainer.classList.add("hidden");
-        previewImg.src = "";
-        qBlock.removeAttribute("data-image");
-    });
-
-    qBlock.querySelector(".maker-remove-btn").addEventListener("click", () => {
-        qBlock.style.animation = "slideOutBlock 0.3s ease forwards";
-        setTimeout(() => { qBlock.remove(); updateMakerCount(); }, 280);
-    });
-
-    qBlock.querySelector(".maker-preview-btn").addEventListener("click", () => {
-        if (typeof compileQuestionFromBlock === 'function') {
-            const qObj = compileQuestionFromBlock(qBlock);
-            if (qObj) showPreviewModal([qObj], 0);
-        }
-    });
-
-    qBlock.querySelector(".maker-sample-btn")?.addEventListener("click", () => {
-        const samples = SAMPLE_DATA[typeSelect];
-        if (!samples || samples.length === 0) return;
-        const q = samples[Math.floor(Math.random() * samples.length)];
-        
-        const qTextEl = qBlock.querySelector(".maker-q-text");
-        if (qTextEl) qTextEl.value = q.text || "";
-        
-        if (typeSelect === "multiple-choice") {
-            const opts = qBlock.querySelectorAll(".maker-q-opt");
-            const radios = qBlock.querySelectorAll(".maker-q-correct");
-            q.options.forEach((optStr, i) => { if (opts[i]) opts[i].value = optStr; });
-            if (q.correct !== undefined && radios[q.correct]) radios[q.correct].checked = true;
-        } else if (typeSelect === "true-false") {
-            const radios = qBlock.querySelectorAll(".maker-q-correct");
-            if (q.correct !== undefined && radios[q.correct]) radios[q.correct].checked = true;
-        } else if (typeSelect === "jumbled-prompt") {
-            const wordInput = qBlock.querySelector(".maker-q-words");
-            if (wordInput && q.words) wordInput.value = q.words.join(", ");
-        } else if (typeSelect === "type-answer") {
-            const ansInput = qBlock.querySelector(".maker-q-answer");
-            if (ansInput) ansInput.value = q.answerText || "";
-        } else if (typeSelect === "number-guess") {
-            const numInput = qBlock.querySelector(".maker-q-number");
-            if (numInput && q.targetNumber !== undefined) numInput.value = q.targetNumber;
-        } else if (typeSelect === "poll") {
-            const pollInput = qBlock.querySelector(".maker-q-poll-opts");
-            if (pollInput && q.options) pollInput.value = q.options.join(", ");
-        } else if (typeSelect === "speed-math") {
-            const eqInput = qBlock.querySelector(".maker-q-math-eq");
-            const ansInput = qBlock.querySelector(".maker-q-math-ans");
-            if (eqInput) eqInput.value = q.equation || "";
-            if (ansInput && q.answerNumber !== undefined) ansInput.value = q.answerNumber;
-        }
-    });
-
-    qBlock.querySelector(".maker-up-btn")?.addEventListener("click", () => {
-        if (qBlock.previousElementSibling) {
-            qBlock.parentNode.insertBefore(qBlock, qBlock.previousElementSibling);
-            qBlock.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        }
-    });
-
-    qBlock.querySelector(".maker-down-btn")?.addEventListener("click", () => {
-        if (qBlock.nextElementSibling) {
-            qBlock.parentNode.insertBefore(qBlock.nextElementSibling, qBlock);
-            qBlock.scrollIntoView({ behavior: "smooth", block: "nearest" });
-        }
-    });
-
-    return qBlock;
+    const updates = {
+        [`answers/${myPlayerId}`]: { ...response, questionIndex: currentQuestionIndex, elapsedTime: Math.round(elapsed * 1000) },
+        totalAnswers: increment(1)
+    };
+    if (response.optionIndex !== undefined) updates[`answersCount/${response.optionIndex}`] = increment(1);
+    await update(sessionRef, updates);
+    document.getElementById('player-waiting-msg')?.classList.remove('hidden');
+    document.getElementById('player-dash-locked')?.classList.remove('hidden');
+    return true;
 }
 
+function renderPlayerQuestionInterface(q) {
+    const type = normalizeQuestionType(q);
+    const answerGrid = document.querySelector('#view-player-question .answer-grid');
+    const special = document.getElementById('player-special-answer');
+    document.getElementById('player-question-text').textContent = q.text || q.dashboardData?.question || 'Question';
+    document.getElementById('player-question-subject').textContent = questionSubject(q);
+    const image = document.getElementById('player-question-image');
+    const imageUrl = q.imageUrl || q.image || '';
+    image.src = imageUrl;
+    image.classList.toggle('hidden', !imageUrl);
+    image.onclick = () => image.classList.toggle('expanded');
+    answerGrid.classList.add('hidden');
+    special.classList.add('hidden');
+    ['player-jumbled-answer', 'player-text-answer', 'player-number-answer', 'player-poll-answer']
+        .forEach(id => document.getElementById(id)?.classList.add('hidden'));
 
-function setupHostManagementWorkflow() {
-    document.getElementById("btn-import-legacy-quizzes")?.addEventListener("click", importLegacyPowerBiQuizzes);
-
-    document.getElementById("btn-open-maker")?.addEventListener("click", () => {
-        editingQuizIndex = null;
-        document.getElementById("maker-quiz-title").value = "";
-        const container = document.getElementById("maker-questions-container");
-        if (container) {
-            container.innerHTML = `
-                <div id="maker-empty-state" class="maker-empty-state">
-                    <div style="font-size:4rem;margin-bottom:1rem">🎮</div>
-                    <h3 style="color:var(--color-cyan)">Start Building!</h3>
-                    <p class="text-muted mt-2">Choose an activity on the left to build your Power BI challenge.</p>
-                </div>`;
-        }
-        updateMakerCount();
-        switchView("adminMaker");
-    });
-    document.getElementById("btn-close-maker")?.addEventListener("click", () => enterHostDashboard());
-
-    // Sidebar type buttons — click to add
-    document.querySelectorAll(".maker-type-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-            const type = btn.getAttribute("data-type");
-            const container = document.getElementById("maker-questions-container");
-            const emptyState = document.getElementById("maker-empty-state");
-            if (emptyState) emptyState.remove();
-            const block = buildMakerBlock(type);
-            container.appendChild(block);
-            block.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            updateMakerCount();
-            btn.classList.add("maker-type-btn-flash");
-            setTimeout(() => btn.classList.remove("maker-type-btn-flash"), 400);
+    if (type === 'multiple-choice' || type === 'true-false') {
+        answerGrid.classList.remove('hidden');
+        document.querySelectorAll('.answer-btn').forEach((button, index) => {
+            const label = q.options?.[index];
+            button.classList.toggle('hidden', label === undefined);
+            button.classList.remove('selected', 'disabled-answer');
+            const labelEl = document.getElementById(`player-answer-${index}`);
+            if (labelEl) labelEl.textContent = label || '';
         });
-    });
-
-    document.getElementById("btn-preview-quiz")?.addEventListener("click", () => {
-        const qBlocks = document.querySelectorAll(".maker-q-block");
-        if (qBlocks.length === 0) { alert("Add at least one question to preview!"); return; }
-        if (typeof compileQuestionFromBlock === 'function') {
-            const qs = Array.from(qBlocks).map(b => compileQuestionFromBlock(b));
-            showPreviewModal(qs, 0);
-        }
-    });
-
-    document.getElementById("btn-save-quiz")?.addEventListener("click", async () => {
-        const title = document.getElementById("maker-quiz-title").value.trim();
-        if (!title) { alert("Give your quiz a title first!"); return; }
-        const qBlocks = document.querySelectorAll(".maker-q-block");
-        if (qBlocks.length === 0) { alert("Add at least one question first!"); return; }
-
-        const newQuiz = { title, questions: [] };
-        let valid = true;
-        let firstInvalidBlock = null;
-
-        qBlocks.forEach(block => {
-            block.classList.remove("validation-error");
-            
-            const markInvalid = () => {
-                valid = false;
-                block.classList.add("validation-error");
-                if (!firstInvalidBlock) firstInvalidBlock = block;
-            };
-
-            const qType = block.getAttribute("data-qtype");
-            const qText = (block.querySelector(".maker-q-text")?.value || "").trim();
-            const qTime = parseInt(block.querySelector(".maker-q-time")?.value) || 20;
-            if (!qText) { markInvalid(); return; }
-            const qImage = block.getAttribute("data-image") || "";
-            const qObj = { type: qType, text: qText, timeLimit: qTime, image: qImage };
-
-            if (qType === "multiple-choice") {
-                const opts = Array.from(block.querySelectorAll(".maker-q-opt")).map(i => i.value.trim()).filter(v => v);
-                if (opts.length < 2) { markInvalid(); return; }
-                const checkedRadio = block.querySelector(".maker-q-correct:checked");
-                const correctIdx = checkedRadio ? parseInt(checkedRadio.value) : 0;
-                qObj.options = opts; qObj.correct = Math.min(correctIdx, opts.length - 1);
-            } else if (qType === "true-false") {
-                const checkedRadio = block.querySelector(".maker-q-correct:checked");
-                qObj.options = ["True", "False"];
-                qObj.correct = checkedRadio ? parseInt(checkedRadio.value) : 0;
-            } else if (qType === "jumbled-prompt") {
-                const words = (block.querySelector(".maker-q-words")?.value || "").split(",").map(w => w.trim()).filter(w => w);
-                if (words.length < 2) { markInvalid(); return; }
-                qObj.words = words;
-            } else if (qType === "type-answer") {
-                const ans = block.querySelector(".maker-q-answer")?.value.trim();
-                if (!ans) { markInvalid(); return; }
-                qObj.answerText = ans;
-            } else if (qType === "number-guess") {
-                const num = parseFloat(block.querySelector(".maker-q-number")?.value);
-                if (isNaN(num)) { markInvalid(); return; }
-                qObj.targetNumber = num;
-            } else if (qType === "poll") {
-                const opts = (block.querySelector(".maker-q-poll-opts")?.value || "").split(",").map(o => o.trim()).filter(o => o);
-                if (opts.length < 2) { markInvalid(); return; }
-                qObj.options = opts; qObj.isPoll = true;
-            } else if (qType === "speed-math") {
-                const eq = block.querySelector(".maker-q-math-eq")?.value.trim();
-                if (!eq) { markInvalid(); return; }
-                qObj.equation = eq;
-            }
-            newQuiz.questions.push(qObj);
-        });
-
-        if (!valid) { 
-            alert("Some questions have missing fields. They have been highlighted in red."); 
-            if (firstInvalidBlock) firstInvalidBlock.scrollIntoView({ behavior: "smooth", block: "center" });
-            return; 
-        }
-        
-        if (editingQuizIndex !== null) {
-            powerBiPresets[editingQuizIndex] = newQuiz;
-        } else {
-            powerBiPresets.push(newQuiz);
-        }
-
-        try {
-            localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
-        } catch (e) {}
-        await syncPresetsToFirebase();
-        enterHostDashboard();
-    });
-}
-
-async function importLegacyPowerBiQuizzes() {
-    const button = document.getElementById("btn-import-legacy-quizzes");
-    const originalLabel = button?.textContent || "Import Old Power BI Quizzes";
-
-    if (!confirm("Import the 8 quizzes and 54 questions from the old Power BI database export? Existing quiz titles will be skipped.")) {
         return;
     }
 
-    if (button) {
-        button.disabled = true;
-        button.textContent = "Importing...";
-    }
-
-    try {
-        const response = await fetch(LEGACY_QUIZ_PACK_URL, { cache: "no-store" });
-        if (!response.ok) throw new Error(`Quiz pack could not be loaded (${response.status}).`);
-
-        const legacyQuizzes = await response.json();
-        if (!Array.isArray(legacyQuizzes)) throw new Error("The old quiz pack has an invalid format.");
-
-        const existingTitles = new Set(
-            powerBiPresets.map(quiz => String(quiz.title || "").trim().toLowerCase())
-        );
-        const importedQuizzes = [];
-
-        legacyQuizzes.forEach(quiz => {
-            const title = String(quiz.title || "").trim();
-            const normalizedTitle = title.toLowerCase();
-            if (!title || existingTitles.has(normalizedTitle) || !Array.isArray(quiz.questions)) return;
-
-            const questions = quiz.questions
-                .filter(question => question && question.text && Array.isArray(question.options))
-                .map(question => ({
-                    type: "multiple-choice",
-                    text: String(question.text),
-                    options: question.options.map(option => String(option)),
-                    correct: Number(question.correct) || 0,
-                    timeLimit: Number(question.timeLimit) || 20,
-                    image: question.image || ""
-                }));
-
-            if (questions.length === 0) return;
-            importedQuizzes.push({ title, questions });
-            existingTitles.add(normalizedTitle);
+    special.classList.remove('hidden');
+    if (type === 'jumbled-prompt') {
+        document.getElementById('player-jumbled-answer').classList.remove('hidden');
+        const available = document.getElementById('player-jumbled-options');
+        const built = document.getElementById('player-jumbled-built');
+        let selected = [];
+        const draw = () => {
+            available.innerHTML = '';
+            built.innerHTML = '';
+            selected.forEach((word, index) => {
+                const chip = document.createElement('button');
+                chip.className = 'jumbled-chip';
+                chip.textContent = word;
+                chip.onclick = () => { selected.splice(index, 1); draw(); };
+                built.appendChild(chip);
+            });
+            const remaining = [...(q.words || [])];
+            selected.forEach(word => remaining.splice(remaining.indexOf(word), 1));
+            remaining.sort(() => Math.random() - 0.5).forEach(word => {
+                const chip = document.createElement('button');
+                chip.className = 'jumbled-chip';
+                chip.textContent = word;
+                chip.onclick = async () => {
+                    selected.push(word);
+                    draw();
+                    if (selected.length === (q.words || []).length) await submitPlayerResponse({ sequence: selected });
+                };
+                available.appendChild(chip);
+            });
+        };
+        document.getElementById('btn-reset-jumbled').onclick = () => { selected = []; draw(); };
+        draw();
+    } else if (type === 'type-answer' || type === 'speed-math') {
+        document.getElementById('player-text-answer').classList.remove('hidden');
+        const input = document.getElementById('input-player-text-answer');
+        input.value = '';
+        input.placeholder = type === 'speed-math' ? 'Enter the required elements' : 'Type your answer';
+        document.getElementById('btn-submit-player-text').onclick = () => submitPlayerResponse({ textAnswer: input.value.trim() });
+    } else if (type === 'number-guess') {
+        document.getElementById('player-number-answer').classList.remove('hidden');
+        const range = document.getElementById('input-player-number-answer');
+        range.min = q.min ?? 0;
+        range.max = q.max ?? 100;
+        range.value = q.defaultValue ?? Math.round((Number(range.min) + Number(range.max)) / 2);
+        const value = document.getElementById('player-number-value');
+        value.textContent = range.value;
+        range.oninput = () => { value.textContent = range.value; };
+        document.getElementById('btn-submit-player-number').onclick = () => submitPlayerResponse({ numberAnswer: Number(range.value) });
+    } else if (type === 'poll') {
+        document.getElementById('player-poll-answer').classList.remove('hidden');
+        const options = document.getElementById('player-poll-options');
+        options.innerHTML = '';
+        (q.options || []).forEach((label, index) => {
+            const button = document.createElement('button');
+            button.className = 'btn btn-secondary w-full';
+            button.textContent = label;
+            button.onclick = () => submitPlayerResponse({ optionIndex: index });
+            options.appendChild(button);
         });
+    }
+}
 
-        if (importedQuizzes.length === 0) {
-            alert("No quizzes were imported. All old quiz titles are already present.");
+// ==========================================
+// UTILS & UI
+// ==========================================
+function generatePin() { return Math.floor(100000 + Math.random() * 900000).toString(); }
+function generateId() { return Math.random().toString(36).substr(2, 9); }
+function getPlayerDeviceId() {
+    let id = localStorage.getItem('dashboard_wars_device_id');
+    if (!id) {
+        id = `${Date.now().toString(36)}-${generateId()}`;
+        localStorage.setItem('dashboard_wars_device_id', id);
+    }
+    return id;
+}
+function savePlayerSession() {
+    if (IS_SIMULATOR_CLIENT || !currentGamePin || !myPlayerId || !myNickname) return;
+    sessionStorage.setItem('dashboard_wars_player_session', JSON.stringify({
+        pin: currentGamePin,
+        playerId: myPlayerId,
+        nickname: myNickname
+    }));
+    localStorage.setItem('dashboard_wars_last_join', JSON.stringify({
+        pin: currentGamePin,
+        nickname: myNickname
+    }));
+}
+function setupPlayerPresence(pin, playerId) {
+    if (IS_SIMULATOR_CLIENT || !pin || !playerId) return;
+    if (playerPresenceUnsubscribe) playerPresenceUnsubscribe();
+    const connectedRef = ref(database, '.info/connected');
+    playerPresenceUnsubscribe = onValue(connectedRef, async snapshot => {
+        if (snapshot.val() !== true) return;
+        currentPlayerConnectionRef = ref(database, `sessions/${pin}/players/${playerId}/online`);
+        await update(ref(database, `sessions/${pin}/players/${playerId}`), {
+            online: true,
+            lastSeen: Date.now()
+        });
+        await onDisconnect(currentPlayerConnectionRef).set(false);
+    });
+}
+function switchView(viewId) {
+    document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+    document.getElementById(viewId).classList.add('active');
+    clearInterval(pointsDecayInterval);
+}
+
+// Start points decay ticker for player UI
+function startPointsDecayTicker(questionStartTime, timeLimit) {
+    clearInterval(pointsDecayInterval);
+    syncedPlayerQuestionStartTime = Number(questionStartTime) || Date.now();
+    syncedPlayerQuestionTimeLimit = Math.max(1, Number(timeLimit) || 20);
+    const updateTicker = () => {
+        if (hasAnsweredThisRound) {
+            clearInterval(pointsDecayInterval);
             return;
         }
-
-        powerBiPresets.push(...importedQuizzes);
-        localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
-        await syncPresetsToFirebase();
-        renderQuizSelector();
-
-        const questionCount = importedQuizzes.reduce((sum, quiz) => sum + quiz.questions.length, 0);
-        alert(`Imported ${importedQuizzes.length} quizzes with ${questionCount} questions.`);
-    } catch (error) {
-        console.error("Old Power BI quiz import failed:", error);
-        alert(`Import failed: ${error.message}`);
-    } finally {
-        if (button) {
-            button.disabled = false;
-            button.textContent = originalLabel;
-        }
-    }
+        if (syncedPlayerQuestionPaused) return;
+        const timeElapsed = Math.max(0, (Date.now() - syncedPlayerQuestionStartTime) / 1000);
+        const speedBonus = Math.max(0, 500 * (1 - (timeElapsed / syncedPlayerQuestionTimeLimit)));
+        const potential = Math.max(500, Math.floor(500 + speedBonus));
+        const el1 = document.getElementById('player-potential-points');
+        const el2 = document.getElementById('player-dash-potential-points');
+        if (el1) el1.innerText = potential;
+        if (el2) el2.innerText = potential;
+    };
+    updateTicker();
+    pointsDecayInterval = setInterval(updateTicker, 100);
 }
 
-async function syncPresetsToFirebase() {
-    if (!isFirebaseEnabled) return;
-    try {
-        await set(ref(database, 'quizzes/powerbi'), powerBiPresets);
-    } catch (err) {
-        console.warn("Firebase sync failed:", err);
-    }
+let isTimeFrozenLocal = false;
+let playerTimerInterval = null;
+let selectedInventoryIndex = null;
+let isDonateModeActive = false;
+
+const POWERUP_DEFS = {
+    steal:        { name: 'Point Steal',      emoji: '💰' },
+    freeze:       { name: 'Time Freeze',      emoji: '⏳' },
+    shield:       { name: 'Defensive Shield', emoji: '🛡️' },
+    multiplier:   { name: '2x Multiplier',    emoji: '⭐' },
+    blur:         { name: 'Foggy Window',     emoji: '🌫️' },
+    shuffle:      { name: 'Answer Shuffle',   emoji: '🔀' },
+    glitch:       { name: 'Glitch Out',       emoji: '📺' },
+    emoji_flood:  { name: 'Emoji Flood',      emoji: '🎈' },
+    redacted:     { name: 'Redacted Question',emoji: '🕵️' },
+    double_shield:{ name: 'Double Shield',    emoji: '🛡️🛡️' },
+    speed_boost:  { name: 'Speed Boost',      emoji: '⚡' },
+};
+function normalizePowerupItem(item) {
+    const source = typeof item === 'string' ? { type: item } : (item || {});
+    const definition = POWERUP_DEFS[source.type] || {
+        name: source.type ? String(source.type).replaceAll('_', ' ') : 'Unknown Power-Up',
+        emoji: '❓'
+    };
+    return {
+        ...source,
+        type: source.type || 'unknown',
+        name: source.name || definition.name,
+        emoji: source.emoji || definition.emoji
+    };
 }
 
-async function loadPresetsFromFirebase() {
-    if (!isFirebaseEnabled) return;
-    try {
-        const snap = await get(ref(database, 'quizzes/powerbi'));
-        if (snap.exists()) {
-            powerBiPresets = snap.val();
-            localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
-        }
-    } catch (err) {
-        console.warn("Firebase load failed:", err);
-    }
-}
+function awardRandomPowerupIfDeserving(isCorrect, newStreak, timeElapsed, currentInventory) {
+    if (!isCorrect) return currentInventory || [];
+    const inv = Array.isArray(currentInventory) ? [...currentInventory] : [];
+    if (inv.length >= 3) return inv;
 
-async function loadHistoryFromFirebase() {
-    if (!isFirebaseEnabled) return null;
-    try {
-        const snap = await get(ref(database, 'quizzes/powerbiHistory'));
-        if (snap.exists()) {
-            return snap.val();
-        }
-    } catch (err) {
-        console.warn("Firebase history load failed:", err);
-    }
-    return null;
-}
+    const hasStreak = newStreak >= 2;
+    const isSpeedy = timeElapsed < 3;
+    const isLucky = Math.random() < 0.25;
 
-async function syncHistoryToFirebase(historyData) {
-    if (!isFirebaseEnabled) return;
-    try {
-        await set(ref(database, 'quizzes/powerbiHistory'), historyData);
-    } catch (err) {
-        console.warn("Firebase history sync failed:", err);
-    }
-}
-
-async function enterHostDashboard() {
-    currentRole = "host";
-    await loadPresetsFromFirebase();
-    switchView("hostSetup");
-    renderQuizSelector();
-    
-    const activePin = sessionStorage.getItem("powerbi_host_session_pin");
-    const banner = document.getElementById("host-active-session-banner");
-    if (banner) {
-        if (activePin) {
-            document.getElementById("banner-active-pin").innerText = activePin;
-            banner.classList.remove("hidden");
+    if (hasStreak || isSpeedy || isLucky) {
+        const rand = Math.random() * 100;
+        let item = null;
+        if (rand < 25) {
+            item = { type: 'shield', name: 'Defensive Shield', emoji: '🛡️' };
+        } else if (rand < 40) {
+            item = { type: 'blur', name: 'Foggy Window', emoji: '🌫️' };
+        } else if (rand < 55) {
+            item = { type: 'shuffle', name: 'Answer Shuffle', emoji: '🔀' };
+        } else if (rand < 67) {
+            item = { type: 'glitch', name: 'Glitch Out', emoji: '📺' };
+        } else if (rand < 79) {
+            item = { type: 'emoji_flood', name: 'Emoji Flood', emoji: '🎈' };
+        } else if (rand < 84) {
+            item = { type: 'redacted', name: 'Redacted Question', emoji: '🕵️' };
+        } else if (rand < 89) {
+            item = { type: 'steal', name: 'Point Steal', emoji: '💰' };
+        } else if (rand < 95) {
+            item = { type: 'freeze', name: 'Time Freeze', emoji: '⏳' };
+        } else if (rand < 98) {
+            item = { type: 'double_shield', name: 'Double Shield', emoji: '🛡️🛡️' };
         } else {
-            banner.classList.add("hidden");
+            item = { type: 'speed_boost', name: 'Speed Boost', emoji: '⚡' };
+        }
+
+        if (item) {
+            inv.push(item);
         }
     }
+    return inv;
+}
+
+function renderPlayerInventory(inventory, myTeam, teamModeActive, teamPools) {
+    const slotsContainer = document.getElementById('player-slots-container');
+    const dashSlotsContainer = document.getElementById('player-dash-slots-container');
+    const stratSlotsContainer = document.getElementById('player-strategy-slots-container');
     
-    let history = [];
-    const fbHistory = await loadHistoryFromFirebase();
-    if (fbHistory) {
-        history = fbHistory;
-        try { localStorage.setItem("powerbi_recent_sessions", JSON.stringify(history)); } catch (e) {}
-    } else {
-        try {
-            const savedHistory = localStorage.getItem("powerbi_recent_sessions");
-            if (savedHistory) {
-                history = JSON.parse(savedHistory);
-            }
-        } catch (e) {
-            history = [];
-        }
-    }
+    const redraw = (container) => {
+        if (!container) return;
+        container.innerHTML = '';
+        
+        for (let i = 0; i < 3; i++) {
+            const slot = document.createElement('div');
+            const item = inventory[i] ? normalizePowerupItem(inventory[i]) : null;
+            
+            if (item) {
+                // Ensure item has emoji/name (admin-granted items may only have type)
+                const emoji = item.emoji;
+                const name = item.name;
 
-    let workshops = 0;
-    let totalPlayers = 0;
-    let avgEngagement = 0;
-
-    if (history.length > 0) {
-        workshops = history.length;
-        totalPlayers = history.reduce((sum, item) => sum + (item.playersCount || 0), 0);
-        const totalAccuracy = history.reduce((sum, item) => sum + (item.accuracy || 0), 0);
-        avgEngagement = Math.round(totalAccuracy / history.length);
-    }
-
-    document.getElementById("metric-workshops").innerText = workshops;
-    document.getElementById("metric-players").innerText = totalPlayers;
-    document.getElementById("metric-score").innerText = avgEngagement + "%";
-
-    const historyList = document.getElementById("history-list");
-    if (historyList) {
-        historyList.innerHTML = "";
-        if (history.length === 0) {
-            historyList.innerHTML = `
-                <tr>
-                    <td colspan="4" class="text-center text-muted text-small py-3">No recent sessions found.</td>
-                </tr>
-            `;
-        } else {
-            [...history].reverse().forEach((session, idx) => {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `
-                    <td class="text-small py-2">${session.date}</td>
-                    <td class="text-small py-2" style="font-weight: 500;">${session.quizTitle}</td>
-                    <td class="text-small py-2 text-center">${session.playersCount}</td>
-                    <td class="text-small py-2 text-center">
-                        <button class="btn btn-danger btn-delete-session" data-index="${history.length - 1 - idx}" style="padding: 0.25rem 0.5rem; background:#ef4444; border:none; border-radius:var(--radius-sm); color:white; cursor:pointer; font-size:0.8rem;">Delete</button>
-                    </td>
+                slot.className = 'inventory-slot';
+                if (selectedInventoryIndex === i) slot.classList.add('selected');
+                
+                slot.innerHTML = `
+                    <span class="inventory-emoji">${emoji}</span>
+                    <span class="inventory-slot-tooltip">${name}</span>
                 `;
-                historyList.appendChild(tr);
-            });
-
-            historyList.querySelectorAll(".btn-delete-session").forEach(btn => {
-                btn.addEventListener("click", async (e) => {
-                    e.stopPropagation();
-                    const targetIdx = parseInt(e.currentTarget.getAttribute("data-index"));
-                    if (confirm("Are you sure you want to delete this session record?")) {
-                        history.splice(targetIdx, 1);
-                        try {
-                            localStorage.setItem("powerbi_recent_sessions", JSON.stringify(history));
-                        } catch (err) {}
-                        await syncHistoryToFirebase(history);
-                        enterHostDashboard();
+                
+                slot.onclick = () => {
+                    if (isDonateModeActive) {
+                        donateItemToTeam(i);
+                        return;
                     }
-                });
-            });
-        }
-    }
-}
-
-function renderQuizSelector() {
-    const listContainer = document.getElementById("custom-quizzes-list");
-    if (!listContainer) return;
-    listContainer.innerHTML = "";
-
-    powerBiPresets.forEach((quiz, index) => {
-        const card = document.createElement("div");
-        card.className = "card card-hover fade-in-up";
-        card.innerHTML = `
-            <h4>${quiz.title}</h4>
-            <p class="text-small">${quiz.questions.length} Power BI activities</p>
-            <div class="flex gap-2 mt-3">
-                <button class="btn btn-primary flex-1 btn-launch-quiz" data-index="${index}">Launch Challenge</button>
-                <button class="btn btn-secondary btn-edit-quiz" data-index="${index}" style="padding: 0.5rem 0.75rem; border-radius:var(--radius-md);" title="Edit Quiz">✏️</button>
-                <button class="btn btn-danger btn-delete-quiz" data-index="${index}" style="padding: 0.5rem 0.75rem; background:#ef4444; border:none; border-radius:var(--radius-md); color:white; cursor:pointer;" title="Delete Quiz">🗑️</button>
-            </div>
-        `;
-        listContainer.appendChild(card);
-    });
-
-    listContainer.querySelectorAll(".btn-launch-quiz").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            const idx = parseInt(e.currentTarget.getAttribute("data-index"));
-            initializeLiveRoom(powerBiPresets[idx]);
-        });
-    });
-
-    listContainer.querySelectorAll(".btn-edit-quiz").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            const idx = parseInt(e.currentTarget.getAttribute("data-index"));
-            loadQuizIntoMaker(idx);
-        });
-    });
-
-    listContainer.querySelectorAll(".btn-delete-quiz").forEach(btn => {
-        btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const idx = parseInt(e.currentTarget.getAttribute("data-index"));
-            if (confirm(`Are you sure you want to delete the quiz "${powerBiPresets[idx].title}"?`)) {
-                powerBiPresets.splice(idx, 1);
-                try {
-                    localStorage.setItem("powerbi_custom_quizzes", JSON.stringify(powerBiPresets));
-                } catch(err) {}
-                syncPresetsToFirebase();
-                renderQuizSelector();
-            }
-        });
-    });
-
-    const startGameButton = document.getElementById("btn-start-game");
-    if (startGameButton) startGameButton.onclick = () => {
-        hostActiveQuestionIndex = 0; 
-        executeQuestionBroadcast(); 
-    };
-
-    const cancelSessionButton = document.getElementById("btn-cancel-session");
-    if (cancelSessionButton) cancelSessionButton.onclick = () => terminateRoomInstance();
-
-    const endGameButton = document.getElementById("btn-host-end-game-early");
-    if (endGameButton) endGameButton.onclick = () => {
-        if (confirm("End game early and skip to final results?")) {
-            hostActiveQuestionIndex = currentQuizData.questions.length;
-            clearInterval(timerInterval);
-            presentHostLeaderboardView();
-        }
-    };
-
-    const rejoinButton = document.getElementById("btn-banner-rejoin");
-    if (rejoinButton) rejoinButton.onclick = () => recoverHostSession();
-
-    const destroyButton = document.getElementById("btn-banner-destroy");
-    if (destroyButton) destroyButton.onclick = () => {
-        if (confirm("Are you sure you want to completely destroy the active live session?")) {
-            terminateRoomInstance();
-        }
-    };
-
-    const backDashboardButton = document.getElementById("btn-back-dashboard");
-    if (backDashboardButton) backDashboardButton.onclick = () => terminateRoomInstance();
-}
-
-function loadQuizIntoMaker(index) {
-    const quiz = powerBiPresets[index];
-    if (!quiz) return;
-
-    editingQuizIndex = index;
-    document.getElementById("maker-quiz-title").value = quiz.title;
-    const container = document.getElementById("maker-questions-container");
-    container.innerHTML = "";
-
-    quiz.questions.forEach(q => {
-        const block = buildMakerBlock(q.type);
-        container.appendChild(block);
-        
-        const qTextEl = block.querySelector(".maker-q-text");
-        if (qTextEl) qTextEl.value = q.text || "";
-        
-        const qTimeEl = block.querySelector(".maker-q-time");
-        if (qTimeEl) qTimeEl.value = q.timeLimit || 20;
-
-        if (q.image) {
-            block.setAttribute("data-image", q.image);
-            const nameSpan = block.querySelector(".maker-q-img-name");
-            const previewContainer = block.querySelector(".maker-q-img-preview-container");
-            const previewImg = block.querySelector(".maker-q-img-preview");
-            const clearBtn = block.querySelector(".btn-clear-img-btn");
-            if (nameSpan) nameSpan.innerText = "Saved Image";
-            if (previewImg) previewImg.src = q.image;
-            if (previewContainer) previewContainer.classList.remove("hidden");
-            if (clearBtn) clearBtn.classList.remove("hidden");
-        }
-
-        if (q.type === "multiple-choice") {
-            const opts = block.querySelectorAll(".maker-q-opt");
-            const radios = block.querySelectorAll(".maker-q-correct");
-            q.options.forEach((optStr, i) => {
-                if (opts[i]) opts[i].value = optStr;
-            });
-            if (q.correct !== undefined && radios[q.correct]) {
-                radios[q.correct].checked = true;
-            }
-        } else if (q.type === "true-false") {
-            const radios = block.querySelectorAll(".maker-q-correct");
-            if (q.correct !== undefined && radios[q.correct]) {
-                radios[q.correct].checked = true;
-            }
-        } else if (q.type === "jumbled-prompt") {
-            const wordInput = block.querySelector(".maker-q-words");
-            if (wordInput && q.words) wordInput.value = q.words.join(", ");
-        } else if (q.type === "type-answer") {
-            const ansInput = block.querySelector(".maker-q-answer");
-            if (ansInput) ansInput.value = q.answerText || "";
-        } else if (q.type === "number-guess") {
-            const numInput = block.querySelector(".maker-q-number");
-            if (numInput && q.targetNumber !== undefined) numInput.value = q.targetNumber;
-        } else if (q.type === "poll") {
-            const pollInput = block.querySelector(".maker-q-poll-opts");
-            if (pollInput && q.options) pollInput.value = q.options.join(", ");
-        } else if (q.type === "speed-math") {
-            const eqInput = block.querySelector(".maker-q-math-eq");
-            const ansInput = block.querySelector(".maker-q-math-ans");
-            if (eqInput) eqInput.value = q.equation || "";
-            if (ansInput && q.answerNumber !== undefined) ansInput.value = q.answerNumber;
-        }
-    });
-
-    updateMakerCount();
-    switchView("adminMaker");
-}
-
-async function initializeLiveRoom(quiz) {
-    currentRole = "host";
-    currentQuizData = quiz;
-    sessionTotalAnswersCount = 0;
-    sessionTotalCorrectAnswersCount = 0;
-
-    if (isFirebaseEnabled) {
-        let roomCreated = false;
-        for (let attempt = 0; attempt < 12 && !roomCreated; attempt++) {
-            const candidatePin = Math.floor(100000 + Math.random() * 900000).toString();
-            const candidateRef = ref(database, `${SESSION_ROOT}/${candidatePin}`);
-            const result = await runTransaction(candidateRef, current => {
-                if (current !== null) return;
-                return {
-                    status: "lobby",
-                    quizTitle: quiz.title,
-                    currentQuestion: -1,
-                    timestamp: Date.now(),
-                    publicState: {
-                        status: "lobby",
-                        currentQuestion: -1
+                    
+                    if (item.type === 'shield' || item.type === 'double_shield' || item.type === 'speed_boost' || item.type === 'multiplier') {
+                        activateBuffItem(i, item);
+                    } else {
+                        selectedInventoryIndex = i;
+                        renderPlayerInventory(inventory, myTeam, teamModeActive, teamPools);
+                        showPlayerTargetSelector(item.type, name, i, false);
                     }
                 };
-            });
-            if (result.committed) {
-                currentSessionPin = candidatePin;
-                gameSessionRef = candidateRef;
-                roomCreated = true;
+            } else {
+                slot.className = 'inventory-slot empty';
+                slot.innerHTML = '';
             }
+            container.appendChild(slot);
         }
-        if (!roomCreated) {
-            alert("Unable to reserve a unique room PIN. Please try again.");
-            return;
-        }
-    } else {
-        currentSessionPin = Math.floor(100000 + Math.random() * 900000).toString();
-    }
-
-    sessionStorage.setItem("powerbi_host_session_pin", currentSessionPin);
-    sessionStorage.setItem("powerbi_host_role", "host");
-    sessionStorage.setItem("powerbi_host_quiz", JSON.stringify(currentQuizData));
-
-    document.getElementById("display-game-pin").innerText = currentSessionPin;
-    updateHostPinDisplays();
-    document.getElementById("display-join-url").innerHTML = `Join at <strong>${window.location.origin}</strong>`;
-
-    const qrContainer = document.getElementById("qr-code-container");
-    if (qrContainer) {
-        qrContainer.innerHTML = "";
-        new QRCode(qrContainer, {
-            text: `${window.location.origin}?pin=${currentSessionPin}`,
-            width: 160, height: 160, colorDark: "#2B2B2B", colorLight: "#FFFFFF"
-        });
-    }
-
-    if (isFirebaseEnabled) {
-        trackLobbyRegistrations();
-    } else {
-        document.getElementById("btn-start-game").disabled = false;
-    }
-    switchView("hostLobby");
-}
-
-function trackLobbyRegistrations() {
-    if (!gameSessionRef) return;
-    const countDisplay = document.getElementById("player-count");
-    const listGrid = document.getElementById("player-list");
-    const startBtn = document.getElementById("btn-start-game");
-
-    if (playerLobbyListener) playerLobbyListener();
-    playerLobbyListener = onValue(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players`), (snapshot) => {
-        listGrid.innerHTML = "";
-        if (!snapshot.exists()) {
-            countDisplay.innerText = "0";
-            startBtn.disabled = true;
-            return;
-        }
-        const data = snapshot.val();
-        const keys = Object.keys(data).filter(k => isPlayerOnline(data[k]));
-        countDisplay.innerText = keys.length;
-        startBtn.disabled = keys.length === 0;
-
-        keys.forEach(k => {
-            const tag = document.createElement("div");
-            tag.className = "player-tag";
-            const name = document.createElement("span");
-            name.textContent = data[k].nickname;
-            const kickButton = document.createElement("button");
-            kickButton.className = "btn-kick";
-            kickButton.dataset.key = k;
-            kickButton.textContent = "×";
-            tag.append(name, kickButton);
-            listGrid.appendChild(tag);
-        });
-
-        listGrid.querySelectorAll(".btn-kick").forEach(btn => {
-            btn.addEventListener("click", async (e) => {
-                const targetKey = e.currentTarget.getAttribute("data-key");
-                const player = data[targetKey];
-                const tasks = [remove(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players/${targetKey}`))];
-                if (player?.nickname) {
-                    const claimRef = ref(
-                        database,
-                        `${SESSION_ROOT}/${currentSessionPin}/nicknameClaims/${nicknameClaimKey(player.nickname)}`
-                    );
-                    tasks.push(runTransaction(claimRef, current => (
-                        current?.playerKey === targetKey ? null : undefined
-                    )));
-                }
-                await Promise.allSettled(tasks);
-            });
-        });
-    });
-
-    if (emojiListener) emojiListener();
-    emojiListener = onChildAdded(ref(database, `${SESSION_ROOT}/${currentSessionPin}/reactions`), (snapshot) => {
-        if (snapshot.exists()) spawnReactionOnHostScreen(snapshot.val().emoji);
-    });
-}
-
-async function terminateRoomInstance() {
-    purgeActiveListeners();
-    if (isFirebaseEnabled && currentSessionPin) await remove(ref(database, `${SESSION_ROOT}/${currentSessionPin}`));
-    enterHostDashboard();
-}
-
-// ==========================================
-// 5. HOST QUESTION BROADCAST ENGINE
-// ==========================================
-async function executeQuestionBroadcast(isReconnect = false) {
-    isTimerPaused = false;
-    document.getElementById("btn-pause-timer").classList.remove("hidden");
-    document.getElementById("btn-resume-timer").classList.add("hidden");
-
-    const q = currentQuizData.questions[hostActiveQuestionIndex];
-    hostAnswersMap = {};
-
-    document.getElementById("host-question-text").innerText = q.text;
-    const hNumber = document.getElementById("host-question-number");
-    if(hNumber) hNumber.innerText = `Question ${hostActiveQuestionIndex + 1} of ${currentQuizData.questions.length}`;
+    };
     
-    const imgContainer = document.getElementById("host-question-image-container");
-    const imgEl = document.getElementById("host-question-image");
-    if (imgContainer && imgEl) {
-        if (q.image) {
-            imgEl.src = q.image;
-            imgContainer.classList.remove("hidden");
+    redraw(slotsContainer);
+    redraw(dashSlotsContainer);
+    redraw(stratSlotsContainer);
+    
+    // Donate buttons
+    const donateBtn = document.getElementById('btn-donate-item');
+    const dashDonateBtn = document.getElementById('btn-dash-donate-item');
+    const stratDonateBtn = document.getElementById('btn-strategy-donate-item');
+    
+    if (teamModeActive && myTeam) {
+        if (donateBtn) { donateBtn.style.display = 'block'; donateBtn.classList.remove('hidden'); }
+        if (dashDonateBtn) { dashDonateBtn.style.display = 'block'; dashDonateBtn.classList.remove('hidden'); }
+        if (stratDonateBtn) { stratDonateBtn.style.display = 'block'; stratDonateBtn.classList.remove('hidden'); }
+    } else {
+        if (donateBtn) { donateBtn.style.display = 'none'; donateBtn.classList.add('hidden'); }
+        if (dashDonateBtn) { dashDonateBtn.style.display = 'none'; dashDonateBtn.classList.add('hidden'); }
+        if (stratDonateBtn) { stratDonateBtn.style.display = 'none'; stratDonateBtn.classList.add('hidden'); }
+    }
+    
+    // Team Pools
+    const poolSec = document.getElementById('player-team-pool-section');
+    const dashPoolSec = document.getElementById('player-dash-team-pool-section');
+    const stratPoolSec = document.getElementById('player-strategy-team-pool-section');
+    
+    if (teamModeActive && myTeam) {
+        if (poolSec) { poolSec.style.display = 'block'; poolSec.classList.remove('hidden'); }
+        if (dashPoolSec) { dashPoolSec.style.display = 'block'; dashPoolSec.classList.remove('hidden'); }
+        if (stratPoolSec) { stratPoolSec.style.display = 'block'; stratPoolSec.classList.remove('hidden'); }
+        
+        const poolItems = teamPools?.[myTeam]?.items || [];
+        
+        const renderPoolItems = (container) => {
+            if (!container) return;
+            container.innerHTML = '';
+            if (poolItems.length === 0) {
+                container.innerHTML = '<span style="font-size:0.65rem; color:var(--text-muted); font-style:italic;">No team items pooled yet.</span>';
+                return;
+            }
+            
+            poolItems.forEach((rawItem, idx) => {
+                const item = normalizePowerupItem(rawItem);
+                const emoji = item.emoji;
+                const name = item.name;
+                const pill = document.createElement('div');
+                pill.className = 'pool-item-pill';
+                pill.innerHTML = `<span>${emoji}</span><span>${name}</span>`;
+                pill.onclick = () => {
+                    if (item.type === 'shield' || item.type === 'double_shield' || item.type === 'speed_boost' || item.type === 'multiplier') {
+                        activateBuffFromPool(idx, item);
+                    } else {
+                        showPlayerTargetSelector(item.type, name, idx, true);
+                    }
+                };
+                container.appendChild(pill);
+            });
+        };
+        
+        renderPoolItems(document.getElementById('player-team-pool-items'));
+        renderPoolItems(document.getElementById('player-dash-team-pool-items'));
+        renderPoolItems(document.getElementById('player-strategy-team-pool-items'));
+    } else {
+        if (poolSec) { poolSec.style.display = 'none'; poolSec.classList.add('hidden'); }
+        if (dashPoolSec) { dashPoolSec.style.display = 'none'; dashPoolSec.classList.add('hidden'); }
+        if (stratPoolSec) { stratPoolSec.style.display = 'none'; stratPoolSec.classList.add('hidden'); }
+    }
+}
+
+function toggleDonateMode() {
+    isDonateModeActive = !isDonateModeActive;
+    const btn = document.getElementById('btn-donate-item');
+    const dashBtn = document.getElementById('btn-dash-donate-item');
+    const stratBtn = document.getElementById('btn-strategy-donate-item');
+    
+    const label = isDonateModeActive ? "❌ Cancel" : "🤝 Donate";
+    if (btn) btn.innerText = label;
+    if (dashBtn) dashBtn.innerText = label;
+    if (stratBtn) stratBtn.innerText = label;
+    
+    if (isDonateModeActive) {
+        showToast("Select an item from inventory to donate it to the team.");
+    }
+}
+
+async function donateItemToTeam(index) {
+    if (!currentGamePin || !myPlayerId) return;
+    const snap = await get(ref(database, `sessions/${currentGamePin}`));
+    const d = snap.val();
+    const pData = d.players?.[myPlayerId];
+    if (!pData || !pData.inventory || !pData.inventory[index]) return;
+    
+    const item = normalizePowerupItem(pData.inventory[index]);
+    const team = pData.team;
+    if (!team) return;
+    
+    const newInv = [...pData.inventory];
+    newInv.splice(index, 1);
+    
+    const poolItems = d.teamPools?.[team]?.items || [];
+    poolItems.push(item);
+    
+    isDonateModeActive = false;
+    const btn = document.getElementById('btn-donate-item');
+    const dashBtn = document.getElementById('btn-dash-donate-item');
+    const stratBtn = document.getElementById('btn-strategy-donate-item');
+    if (btn) btn.innerText = "🤝 Donate";
+    if (dashBtn) dashBtn.innerText = "🤝 Donate";
+    if (stratBtn) stratBtn.innerText = "🤝 Donate";
+    
+    const updates = {};
+    updates[`players/${myPlayerId}/inventory`] = newInv;
+    updates[`teamPools/${team}/items`] = poolItems;
+    
+    await update(ref(database, `sessions/${currentGamePin}`), updates);
+    showToast(`Donated ${item.emoji} ${item.name} to the team shared pool!`);
+}
+
+async function activateBuffItem(index, item) {
+    if (!currentGamePin || !myPlayerId) return;
+    const snap = await get(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`));
+    const pData = snap.val();
+    if (!pData || !pData.inventory) return;
+    
+    const newInv = [...pData.inventory];
+    newInv.splice(index, 1);
+    
+    const updates = { inventory: newInv };
+    
+    if (item.type === 'shield') {
+        updates.shieldCount = (pData.shieldCount || 0) + 1;
+        updates.shieldActive = true;
+        showShieldActiveLocalEffect();
+    } else if (item.type === 'double_shield') {
+        updates.shieldCount = (pData.shieldCount || 0) + 2;
+        updates.shieldActive = true;
+        showShieldActiveLocalEffect();
+    } else if (item.type === 'speed_boost') {
+        updates.speedBoostActive = true;
+        showToast("⚡ Speed Boost Active! Next correct answer gets 1.5x points.");
+    } else if (item.type === 'multiplier') {
+        updates.multiplierActive = true;
+        showToast("⭐ 2x Multiplier Active! Next correct answer gets double points.");
+    }
+    
+    await update(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`), updates);
+}
+
+async function activateBuffFromPool(poolIndex, item) {
+    if (!currentGamePin || !myPlayerId) return;
+    const snap = await get(ref(database, `sessions/${currentGamePin}`));
+    const d = snap.val();
+    const pData = d.players?.[myPlayerId];
+    const team = pData?.team;
+    if (!team) return;
+    
+    const poolItems = d.teamPools?.[team]?.items || [];
+    if (!poolItems[poolIndex]) return;
+    
+    poolItems.splice(poolIndex, 1);
+    
+    const updates = {};
+    updates[`teamPools/${team}/items`] = poolItems;
+    
+    if (item.type === 'shield') {
+        updates[`players/${myPlayerId}/shieldCount`] = (pData.shieldCount || 0) + 1;
+        updates[`players/${myPlayerId}/shieldActive`] = true;
+        showShieldActiveLocalEffect();
+    } else if (item.type === 'double_shield') {
+        updates[`players/${myPlayerId}/shieldCount`] = (pData.shieldCount || 0) + 2;
+        updates[`players/${myPlayerId}/shieldActive`] = true;
+        showShieldActiveLocalEffect();
+    } else if (item.type === 'speed_boost') {
+        updates[`players/${myPlayerId}/speedBoostActive`] = true;
+        showToast("⚡ Speed Boost Active! Next correct answer gets 1.5x points.");
+    } else if (item.type === 'multiplier') {
+        updates[`players/${myPlayerId}/multiplierActive`] = true;
+        showToast("⭐ 2x Multiplier Active! Next correct answer gets double points.");
+    }
+    
+    await update(ref(database, `sessions/${currentGamePin}`), updates);
+}
+
+const TUTORIAL_SLIDES = [
+    {
+        title: "🎮 Welcome to Dashboard Wars!",
+        desc: "Answer questions on your phone. Earn points based on accuracy and speed. Keep your streak alive to multiply your scores!"
+    },
+    {
+        title: "🎒 Strategic Inventory",
+        desc: "Answering correctly earns you power-ups and sabotages! You can hold up to 3 items in your inventory. Choose when to deploy them wisely."
+    },
+    {
+        title: "🌫️ Attacks & Sabotages",
+        desc: "Launch attacks on opponents! Foggy Window blurs screens (tap 5x to clear), Answer Shuffle randomizes button positions, Emoji Flood blocks views, Glitch Out grays out screens, Time Freeze delays timers, and Point Steal takes 100 points!"
+    },
+    {
+        title: "🛡️ Shields & Boosts",
+        desc: "Use Defensive Shields to block incoming sabotages automatically. Double Shields block 2 attacks. Use Speed Boost to multiply your next correct answer points by 1.5x!"
+    },
+    {
+        title: "👥 Team Mechanics",
+        desc: "When Team Mode is active, donate items to your team's Shared Pool. Coordinate with your group to launch powerful team-wide sabotages!"
+    }
+];
+
+let currentTutorialSlide = 0;
+
+function initTutorialCarousel() {
+    const container = document.getElementById('tutorial-carousel-container');
+    const dotsContainer = document.getElementById('tutorial-dots');
+    if (!container || !dotsContainer) return;
+
+    const renderSlide = (index) => {
+        currentTutorialSlide = index;
+        const slide = TUTORIAL_SLIDES[index];
+        container.innerHTML = `
+            <div class="tutorial-slide">
+                <h3>${slide.title}</h3>
+                <p>${slide.desc}</p>
+            </div>
+        `;
+        
+        const dots = dotsContainer.querySelectorAll('.tutorial-dot');
+        dots.forEach((dot, idx) => {
+            dot.classList.toggle('active', idx === index);
+        });
+    };
+
+    dotsContainer.innerHTML = '';
+    TUTORIAL_SLIDES.forEach((_, idx) => {
+        const dot = document.createElement('div');
+        dot.className = 'tutorial-dot';
+        dot.onclick = () => renderSlide(idx);
+        dotsContainer.appendChild(dot);
+    });
+
+    document.getElementById('btn-tutorial-prev').onclick = () => {
+        const prev = (currentTutorialSlide - 1 + TUTORIAL_SLIDES.length) % TUTORIAL_SLIDES.length;
+        renderSlide(prev);
+    };
+
+    document.getElementById('btn-tutorial-next').onclick = () => {
+        const next = (currentTutorialSlide + 1) % TUTORIAL_SLIDES.length;
+        renderSlide(next);
+    };
+
+    renderSlide(0);
+}
+
+async function showPlayerTargetSelector(attackType, attackName, itemIndex, isFromTeamPool) {
+    if (!currentGamePin) return;
+    const snap = await get(ref(database, `sessions/${currentGamePin}`));
+    const d = snap.val() || {};
+    const players = d.players || {};
+    
+    const modal = document.getElementById('player-target-modal');
+    const listEl = document.getElementById('player-target-list');
+    if (!modal || !listEl) return;
+    
+    listEl.innerHTML = '';
+    modal.classList.remove('hidden');
+    
+    const sortedPlayers = Object.entries(players)
+        .map(([id, p]) => ({ id, ...p }))
+        .filter(p => p.id !== myPlayerId)
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+        
+    if (sortedPlayers.length === 0) {
+        listEl.innerHTML = '<p class="text-small text-muted" style="text-align:center;padding:1rem;">No other players found to target.</p>';
+        return;
+    }
+    
+    const myTeam = players[myPlayerId]?.team;
+    const isQueued = currentGameState !== 'question';
+    const attacksRefPath = 'queuedAttacks';
+
+    const consumeItem = async () => {
+        if (isFromTeamPool) {
+            const poolItems = d.teamPools?.[myTeam]?.items || [];
+            const idx = poolItems.findIndex(it => it.type === attackType);
+            if (idx !== -1) {
+                poolItems.splice(idx, 1);
+                await update(ref(database, `sessions/${currentGamePin}`), {
+                    [`teamPools/${myTeam}/items`]: poolItems
+                });
+            }
         } else {
-            imgEl.src = "";
-            imgContainer.classList.add("hidden");
-        }
-    }
-    
-    const mcContainer = document.getElementById("host-ans-container-mc");
-    const tfContainer = document.getElementById("host-ans-container-tf");
-    const jumbledContainer = document.getElementById("host-ans-container-jumbled");
-    const textContainer = document.getElementById("host-ans-container-text");
-    const numberContainer = document.getElementById("host-ans-container-number");
-    const pollContainer = document.getElementById("host-ans-container-poll");
-    const speedmathContainer = document.getElementById("host-ans-container-speedmath");
-    
-    if (mcContainer) mcContainer.classList.add("hidden");
-    if (tfContainer) tfContainer.classList.add("hidden");
-    if (jumbledContainer) jumbledContainer.classList.add("hidden");
-    if (textContainer) textContainer.classList.add("hidden");
-    if (numberContainer) numberContainer.classList.add("hidden");
-    if (pollContainer) pollContainer.classList.add("hidden");
-    if (speedmathContainer) speedmathContainer.classList.add("hidden");
-
-    if (!q.type || q.type === "multiple-choice") {
-        if (mcContainer) mcContainer.classList.remove("hidden");
-        document.getElementById("host-ans-0").innerText = q.options[0] || "";
-        document.getElementById("host-ans-1").innerText = q.options[1] || "";
-        document.getElementById("host-ans-2").innerText = q.options[2] || "";
-        document.getElementById("host-ans-3").innerText = q.options[3] || "";
-    } else if (q.type === "true-false") {
-        if (tfContainer) tfContainer.classList.remove("hidden");
-        document.getElementById("host-ans-tf-0").innerText = q.options[0] || "True";
-        document.getElementById("host-ans-tf-1").innerText = q.options[1] || "False";
-    } else if (q.type === "jumbled-prompt") {
-        if (jumbledContainer) jumbledContainer.classList.remove("hidden");
-        const container = document.getElementById("host-jumbled-words");
-        if (container) {
-            container.innerHTML = "";
-            const scrambled = [...q.words].sort(() => Math.random() - 0.5);
-            scrambled.forEach(w => {
-                const span = document.createElement("span");
-                span.className = "jumbled-word-chip";
-                span.innerText = w;
-                container.appendChild(span);
+            const pData = players[myPlayerId];
+            const newInv = [...(pData?.inventory || [])];
+            newInv.splice(itemIndex, 1);
+            await update(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`), {
+                inventory: newInv
             });
         }
-    } else if (q.type === "type-answer") {
-        if (textContainer) textContainer.classList.remove("hidden");
-    } else if (q.type === "number-guess") {
-        if (numberContainer) numberContainer.classList.remove("hidden");
-    } else if (q.type === "poll") {
-        if (pollContainer) pollContainer.classList.remove("hidden");
-    } else if (q.type === "speed-math") {
-        if (speedmathContainer) speedmathContainer.classList.remove("hidden");
-        const eqDisplay = document.getElementById("host-math-equation-display");
-        if (eqDisplay) {
-            eqDisplay.innerText = `Required: ${q.equation || ""}`;
+    };
+
+    const executeAttack = async (targetId, targetName) => {
+        if (!confirm(`Use ${attackName} on ${targetName}?`)) return;
+        modal.classList.add('hidden');
+        await consumeItem();
+        
+        const attackRef = push(ref(database, `sessions/${currentGamePin}/${attacksRefPath}`));
+        await set(attackRef, {
+            attackerId: myPlayerId,
+            attackerName: myNickname,
+            attackerTeam: myTeam || null,
+            targetId,
+            targetName,
+            type: attackType,
+            timestamp: Date.now(),
+            blocked: false
+        });
+
+        if (isQueued) {
+            showToast(`⏳ Sabotage queued for ${targetName}!`);
+        } else {
+            showToast(`⚔️ Sabotage fired at ${targetName}!`);
         }
-    }
+    };
 
-    document.getElementById("answers-count").innerText = "0 Answers";
+    const executeTeamAttack = async (targetTeamKey, targetTeamName) => {
+        modal.classList.add('hidden');
+        
+        if (isFromTeamPool) {
+            const poolItems = d.teamPools?.[myTeam]?.items || [];
+            const idx = poolItems.findIndex(it => it.type === attackType);
+            if (idx !== -1) {
+                poolItems.splice(idx, 1);
+                await update(ref(database, `sessions/${currentGamePin}`), {
+                    [`teamPools/${myTeam}/items`]: poolItems
+                });
+            }
+        } else {
+            const pData = players[myPlayerId];
+            const myInv = pData?.inventory || [];
+            let removed = 0;
+            const newInv = [];
+            for (let i = 0; i < myInv.length; i++) {
+                if (myInv[i].type === attackType && removed < 2) {
+                    removed++;
+                } else {
+                    newInv.push(myInv[i]);
+                }
+            }
+            await update(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`), {
+                inventory: newInv
+            });
+        }
 
-    if (isFirebaseEnabled) {
-        if (!isReconnect) {
-            const publicState = {
-                status: "question",
-                currentQuestion: hostActiveQuestionIndex,
-                totalQuestions: currentQuizData.questions.length,
-                questionText: q.text,
-                questionImage: q.image || null,
-                timeLimit: q.timeLimit || 20,
-                questionType: q.type || "multiple-choice",
-                questionWords: q.words || null,
-                questionOptions: q.options || null,
-                questionEquation: q.equation || null,
-                questionStartTime: Date.now()
+        const targetPlayers = Object.entries(players).filter(([, p]) => p.team === targetTeamKey);
+        const updates = {};
+        
+        targetPlayers.forEach(([pid, p]) => {
+            const newAttackRef = push(ref(database, `sessions/${currentGamePin}/${attacksRefPath}`));
+            updates[`${attacksRefPath}/${newAttackRef.key}`] = {
+                attackerId: myPlayerId,
+                attackerName: myNickname,
+                attackerTeam: myTeam || null,
+                targetId: pid,
+                targetName: p.name,
+                type: attackType,
+                timestamp: Date.now(),
+                blocked: false
             };
-            await update(gameSessionRef, { 
-                ...publicState,
-                publicState,
-                answers: null,
-                reactions: null
+        });
+        
+        await update(ref(database, `sessions/${currentGamePin}`), updates);
+        
+        if (isQueued) {
+            showToast(`⏳ Team Sabotage queued for ${targetTeamName}!`);
+        } else {
+            showToast(`⚔️ Sabotage fired at all players in ${targetTeamName}!`);
+        }
+    };
+    
+    const allSorted = Object.entries(players)
+        .map(([id, p]) => ({ id, ...p }))
+        .sort((a, b) => (b.score || 0) - (a.score || 0));
+        
+    const amILeader = allSorted.length > 0 && allSorted[0].id === myPlayerId;
+    const topTarget = sortedPlayers[0];
+    
+    const leaderBtn = document.createElement('button');
+    leaderBtn.className = 'btn btn-secondary text-small target-btn';
+    if (amILeader) {
+        leaderBtn.innerHTML = `🥈 2nd Place (<strong>${topTarget.name}</strong>)`;
+    } else {
+        leaderBtn.innerHTML = `🥇 Leader (<strong>${topTarget.name}</strong>)`;
+    }
+    leaderBtn.onclick = () => executeAttack(topTarget.id, topTarget.name);
+    listEl.appendChild(leaderBtn);
+    
+    const randBtn = document.createElement('button');
+    randBtn.className = 'btn btn-secondary text-small target-btn';
+    randBtn.innerHTML = `🎲 Random Player`;
+    randBtn.onclick = () => {
+        const randTarget = sortedPlayers[Math.floor(Math.random() * sortedPlayers.length)];
+        executeAttack(randTarget.id, randTarget.name);
+    };
+    listEl.appendChild(randBtn);
+    
+    if (myTeam) {
+        const opponents = sortedPlayers.filter(p => p.team !== myTeam);
+        if (opponents.length > 0) {
+            const oppBtn = document.createElement('button');
+            oppBtn.className = 'btn btn-secondary text-small target-btn';
+            oppBtn.innerHTML = `⚔️ Random Opponent`;
+            oppBtn.onclick = () => {
+                const randOpp = opponents[Math.floor(Math.random() * opponents.length)];
+                executeAttack(randOpp.id, randOpp.name);
+            };
+            listEl.appendChild(oppBtn);
+        }
+
+        let canTargetTeam = false;
+        if (isFromTeamPool) {
+            canTargetTeam = true;
+        } else {
+            const myInv = players[myPlayerId]?.inventory || [];
+            const matches = myInv.filter(it => it.type === attackType);
+            if (matches.length >= 2) canTargetTeam = true;
+        }
+
+        TEAM_COLORS.forEach(teamObj => {
+            if (teamObj.key === myTeam) return;
+            const teamPlayers = Object.values(players).filter(p => p.team === teamObj.key);
+            if (teamPlayers.length === 0) return;
+
+            const teamBtn = document.createElement('button');
+            teamBtn.className = 'btn btn-secondary text-small target-btn';
+            teamBtn.style.borderLeft = `4px solid ${teamObj.color}`;
+            
+            if (canTargetTeam) {
+                const targetTeamLabel = getTeamLabel(teamObj.key);
+                teamBtn.innerHTML = `⚔️ Sabotage ${targetTeamLabel}`;
+                teamBtn.onclick = () => executeTeamAttack(teamObj.key, targetTeamLabel);
+            } else {
+                teamBtn.innerHTML = `⚔️ Sabotage ${getTeamLabel(teamObj.key)} (Requires 2 of same item)`;
+                teamBtn.disabled = true;
+                teamBtn.style.opacity = '0.5';
+            }
+            listEl.appendChild(teamBtn);
+        });
+    }
+
+    const individualHeading = document.createElement('div');
+    individualHeading.className = 'text-small text-muted';
+    individualHeading.textContent = 'Players';
+    listEl.appendChild(individualHeading);
+    sortedPlayers.forEach(player => {
+        const playerBtn = document.createElement('button');
+        playerBtn.className = 'btn btn-secondary text-small target-btn player-target-option';
+        playerBtn.dataset.playerName = String(player.name || '').toLowerCase();
+        playerBtn.textContent = `${player.team ? '⚔️ ' : ''}${player.name}`;
+        playerBtn.addEventListener('click', () => executeAttack(player.id, player.name));
+        listEl.appendChild(playerBtn);
+    });
+
+    const targetSearch = document.getElementById('input-target-search');
+    if (targetSearch) {
+        targetSearch.value = '';
+        targetSearch.blur();
+        targetSearch.oninput = () => {
+            const query = targetSearch.value.trim().toLowerCase();
+            listEl.querySelectorAll('.player-target-option').forEach(button => {
+                button.classList.toggle('hidden', Boolean(query) && !button.dataset.playerName.includes(query));
+            });
+        };
+    }
+}
+
+function showShieldActiveLocalEffect() {
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#166534;color:white;padding:0.75rem 1.5rem;border-radius:12px;z-index:99999;font-weight:bold;pointer-events:none;animation:fadeInUp 0.3s ease';
+    toast.innerText = '🛡️ Shield Activated! You are immune to the next attack.';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+    document.getElementById('player-powerup-bar')?.classList.add('hidden');
+    document.getElementById('player-dash-powerup-bar')?.classList.add('hidden');
+}
+
+function showShieldBlockEffect() {
+    const flash = document.createElement('div');
+    flash.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(34,197,94,0.4);pointer-events:none;z-index:99999;transition:opacity 0.8s ease-out';
+    document.body.appendChild(flash);
+    setTimeout(() => { flash.style.opacity = '0'; setTimeout(() => flash.remove(), 800); }, 100);
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#166534;color:white;padding:0.75rem 1.5rem;border-radius:12px;z-index:99999;font-weight:bold;pointer-events:none;animation:fadeInUp 0.3s ease';
+    toast.innerText = '🛡️ Shield blocked an incoming attack!';
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+}
+
+function startEmojiFloodSabotage() {
+    const activeOverlay = document.getElementById('view-player-question').classList.contains('active')
+        ? document.getElementById('emoji-flood-overlay')
+        : document.getElementById('dash-emoji-flood-overlay');
+    if (!activeOverlay) return;
+    
+    activeOverlay.innerHTML = '';
+    activeOverlay.classList.remove('hidden');
+    
+    // Add instruction text
+    const hint = document.createElement('div');
+    hint.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:white;font-family:var(--font-heading);font-weight:700;font-size:1.2rem;text-align:center;z-index:1000;pointer-events:none;text-shadow:0 2px 8px rgba(0,0,0,0.8);animation:pulse 1s infinite';
+    hint.innerText = '👆 TAP EMOJIS TO CLEAR!';
+    activeOverlay.appendChild(hint);
+    
+    let popped = 0;
+    const emojis = ['🎈', '👾', '⚠️', '🔥', '💩'];
+    for (let i = 0; i < 5; i++) {
+        const pop = document.createElement('div');
+        pop.className = 'bouncing-emoji';
+        pop.innerText = emojis[i];
+        pop.style.left = Math.random() * 80 + 10 + '%';
+        pop.style.top = Math.random() * 80 + 10 + '%';
+        pop.addEventListener('click', (e) => {
+            e.stopPropagation();
+            pop.remove();
+            popped++;
+            if (popped >= 5) {
+                activeOverlay.classList.add('hidden');
+                activeOverlay.innerHTML = '';
+            }
+        });
+        activeOverlay.appendChild(pop);
+    }
+    
+    // Auto-clear fallback after 15 seconds in case player can't tap
+    setTimeout(() => {
+        activeOverlay.classList.add('hidden');
+        activeOverlay.innerHTML = '';
+    }, 15000);
+}
+
+function showPersistentDebuffNotification({ typeName, attackerName, attackerTeam, howToClear }) {
+    let stack = document.getElementById('debuff-notification-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'debuff-notification-stack';
+        document.body.appendChild(stack);
+    }
+    const card = document.createElement('div');
+    card.className = 'debuff-card';
+    const teamText = attackerTeam ? ` (${getTeamLabel(attackerTeam)})` : '';
+    const header = document.createElement('div');
+    header.className = 'debuff-card-header';
+    const title = document.createElement('strong');
+    title.textContent = `⚠️ ${attackerName}${teamText} used ${typeName}`;
+    const clearButton = document.createElement('button');
+    clearButton.type = 'button';
+    clearButton.textContent = 'Clear';
+    clearButton.addEventListener('click', () => card.remove());
+    const details = document.createElement('p');
+    details.textContent = howToClear;
+    header.append(title, clearButton);
+    card.append(header, details);
+    stack.prepend(card);
+}
+
+function clearSabotageEffectsForNextQuestion() {
+    isTimeFrozenLocal = false;
+    ['view-player-question', 'view-player-dashboard'].forEach(id => {
+        document.getElementById(id)?.classList.remove('sabotage-blur', 'sabotage-greyout', 'sabotage-shake', 'sabotage-redacted');
+    });
+    document.querySelectorAll('.answer-btn').forEach(button => {
+        button.style.order = '';
+        button.disabled = false;
+        button.style.pointerEvents = '';
+        button.style.opacity = '';
+    });
+    ['emoji-flood-overlay', 'dash-emoji-flood-overlay'].forEach(id => {
+        const overlay = document.getElementById(id);
+        if (overlay) {
+            overlay.classList.add('hidden');
+            overlay.innerHTML = '';
+        }
+    });
+}
+
+function applySabotageEffect(type, attackerName, attackerTeam, attackerId) {
+    const qView = document.getElementById('view-player-question');
+    const dView = document.getElementById('view-player-dashboard');
+    
+    let typeName = type.toUpperCase().replace('_', ' ');
+    let howToClear = "Resolves automatically.";
+    if (type === 'blur') {
+        typeName = "Foggy Window";
+        howToClear = "TAP screen 5 times to wipe screen clean!";
+    } else if (type === 'emoji_flood') {
+        typeName = "Emoji Flood";
+        howToClear = "Pop all balloons to clear your screen!";
+    } else if (type === 'shuffle') {
+        typeName = "Answer Shuffle";
+        howToClear = "Buttons shuffled! Read answers carefully.";
+    } else if (type === 'freeze') {
+        typeName = "Time Freeze";
+        howToClear = "Timer frozen for 3 seconds!";
+    } else if (type === 'steal') {
+        typeName = "Point Steal";
+        howToClear = "Stole 100 points from you!";
+    } else if (type === 'glitch') {
+        typeName = "Glitch Out";
+        howToClear = "Grayscale glitch! Resolves in 7s.";
+    } else if (type === 'redacted') {
+        typeName = "Redacted Question";
+        howToClear = "Tap the question card to reveal it, or wait 8 seconds.";
+    }
+
+    showPersistentDebuffNotification({ typeName, attackerName, attackerTeam, howToClear });
+
+    if (type === 'blur') {
+        qView.classList.add('sabotage-blur');
+        dView.classList.add('sabotage-blur');
+        
+        let clicks = 0;
+        const clickHandler = () => {
+            clicks++;
+            if (clicks >= 5) {
+                qView.classList.remove('sabotage-blur');
+                dView.classList.remove('sabotage-blur');
+                document.removeEventListener('click', clickHandler);
+                showToast("✨ Foggy Window wiped clean!");
+            }
+        };
+        document.addEventListener('click', clickHandler);
+        
+        setTimeout(() => {
+            qView.classList.remove('sabotage-blur');
+            dView.classList.remove('sabotage-blur');
+            document.removeEventListener('click', clickHandler);
+        }, 8000);
+
+    } else if (type === 'shuffle') {
+        const buttons = Array.from(document.querySelectorAll('.answer-btn'));
+        const orders = [0, 1, 2, 3].sort(() => Math.random() - 0.5);
+        buttons.forEach((btn, idx) => {
+            btn.style.order = orders[idx];
+        });
+        showToast("🔀 Buttons shuffled!");
+
+    } else if (type === 'freeze') {
+        isTimeFrozenLocal = true;
+        showToast("❄️ Screen Frozen for 3s!");
+        setTimeout(() => {
+            isTimeFrozenLocal = false;
+        }, 3000);
+
+    } else if (type === 'steal') {
+        (async () => {
+            if (!currentGamePin || !myPlayerId) return;
+            const snap = await get(ref(database, `sessions/${currentGamePin}`));
+            const sessionVal = snap.val();
+            const pData = sessionVal?.players?.[myPlayerId];
+            if (!pData) return;
+
+            const oldScore = pData.score || 0;
+            const stolen = Math.min(oldScore, 100);
+            
+            const updates = {};
+            updates[`players/${myPlayerId}/score`] = oldScore - stolen;
+            
+            if (attackerId) {
+                const atkData = sessionVal.players[attackerId];
+                if (atkData) {
+                    updates[`players/${attackerId}/score`] = (atkData.score || 0) + stolen;
+                }
+            }
+            await update(ref(database, `sessions/${currentGamePin}`), updates);
+            showToast(`💰 Stole 100 points!`);
+        })();
+
+    } else if (type === 'glitch') {
+        qView.classList.add('sabotage-greyout');
+        dView.classList.add('sabotage-greyout');
+        setTimeout(() => {
+            qView.classList.remove('sabotage-greyout');
+            dView.classList.remove('sabotage-greyout');
+        }, 7000);
+
+    } else if (type === 'emoji_flood') {
+        startEmojiFloodSabotage();
+    } else if (type === 'redacted') {
+        qView.classList.add('sabotage-redacted');
+        // Disable answer buttons so player cannot select while question is hidden
+        const answerButtons = document.querySelectorAll('#view-player-question .answer-btn');
+        answerButtons.forEach(btn => {
+            btn.disabled = true;
+            btn.style.pointerEvents = 'none';
+            btn.style.opacity = '0.3';
+        });
+        const questionCard = document.querySelector('#view-player-question .player-question-card');
+        const clearRedaction = () => {
+            qView.classList.remove('sabotage-redacted');
+            answerButtons.forEach(btn => {
+                btn.disabled = false;
+                btn.style.pointerEvents = '';
+                btn.style.opacity = '';
+            });
+            questionCard?.removeEventListener('click', clearRedaction);
+        };
+        questionCard?.addEventListener('click', clearRedaction, { once: true });
+        setTimeout(clearRedaction, 8000);
+    }
+}
+
+// Particle Canvas Implementation
+function initLandingParticles() {
+    const canvas = document.getElementById('landing-particles');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let particles = [];
+    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+    resize();
+    window.addEventListener('resize', resize);
+
+    for (let i = 0; i < 80; i++) {
+        particles.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            size: Math.random() * 2.5 + 0.5,
+            speedX: (Math.random() - 0.5) * 0.4,
+            speedY: (Math.random() - 0.5) * 0.3 - 0.2,
+            opacity: Math.random() * 0.5 + 0.1,
+            hue: Math.random() > 0.7 ? 45 : 55,
+        });
+    }
+
+    function animateParticles() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        particles.forEach(p => {
+            p.x += p.speedX;
+            p.y += p.speedY;
+            p.opacity += (Math.random() - 0.5) * 0.02;
+            p.opacity = Math.max(0.05, Math.min(0.6, p.opacity));
+            if (p.x < 0) p.x = canvas.width;
+            if (p.x > canvas.width) p.x = 0;
+            if (p.y < 0) p.y = canvas.height;
+            if (p.y > canvas.height) p.y = 0;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fillStyle = `hsla(${p.hue}, 100%, 65%, ${p.opacity})`;
+            ctx.fill();
+        });
+        requestAnimationFrame(animateParticles);
+    }
+    animateParticles();
+}
+
+// Firebase Auth Listener
+onAuthStateChanged(auth, (user) => {
+    if (user) {
+        onValue(ref(database, `users/${user.uid}/quizzes`), (snapshot) => {
+            customQuizzes = snapshot.val() || {};
+            renderCustomQuizzes();
+        });
+        onValue(ref(database, `users/${user.uid}/history`), (snapshot) => {
+            sessionHistory = snapshot.val() || {};
+            renderMetrics();
+            renderHistoryTable();
+        });
+    }
+});
+
+function renderMetrics() {
+    const keys = Object.keys(sessionHistory);
+    let totalPlayers = 0;
+    let totalScore = 0;
+    let scoresCount = 0;
+
+    keys.forEach(k => {
+        const h = sessionHistory[k];
+        totalPlayers += (h.playerCount || 0);
+        if (h.topScores && h.topScores.length > 0) {
+            h.topScores.forEach(s => {
+                totalScore += s.score;
+                scoresCount++;
             });
         }
-        if (answersListener) answersListener();
-        answersListener = onValue(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers`), (snapshot) => {
-            if (snapshot.exists()) {
-                hostAnswersMap = Object.fromEntries(
-                    Object.entries(snapshot.val()).filter(([, answer]) => (
-                        answer.questionIndex === hostActiveQuestionIndex
-                    ))
-                );
-                document.getElementById("answers-count").innerText = `${Object.keys(hostAnswersMap).length} Answers`;
-            } else {
-                hostAnswersMap = {};
-                document.getElementById("answers-count").innerText = "0 Answers";
-            }
-        });
-    }
+    });
 
-    switchView("hostQuestion");
+    const avgScore = scoresCount > 0 ? Math.floor(totalScore / scoresCount) : 0;
     
-    if (isReconnect) {
-        get(ref(database, `${SESSION_ROOT}/${currentSessionPin}`)).then((snap) => {
-            if (snap.exists()) {
-                const session = snap.val();
-                const elapsed = Math.floor((Date.now() - (session.questionStartTime || Date.now())) / 1000);
-                const remaining = Math.max(0, (session.timeLimit || 20) - elapsed);
-                runTimerCountdown(remaining);
-            } else {
-                runTimerCountdown(q.timeLimit);
-            }
-        }).catch(() => {
-            runTimerCountdown(q.timeLimit);
-        });
-    } else {
-        runTimerCountdown(q.timeLimit);
+    document.getElementById('metric-workshops').innerText = keys.length;
+    document.getElementById('metric-players').innerText = totalPlayers;
+    document.getElementById('metric-score').innerText = avgScore;
+}
+
+function renderHistoryTable() {
+    const tbody = document.getElementById('history-list');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const keys = Object.keys(sessionHistory).sort((a,b) => sessionHistory[b].date - sessionHistory[a].date);
+    
+    if (keys.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted text-small py-3">No recent sessions found.</td></tr>';
+        return;
     }
+
+    keys.slice(0, 5).forEach(k => {
+        const h = sessionHistory[k];
+        const dateStr = new Date(h.date).toLocaleDateString();
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td>${dateStr}</td>
+            <td>${h.quizName || 'Preset Session'}</td>
+            <td>${h.playerCount || 0}</td>
+            <td class="flex gap-2">
+                <button class="btn btn-secondary text-small py-1 px-2" onclick="window.downloadHistoryCsv('${k}')">CSV</button>
+                <button class="btn btn-secondary text-small py-1 px-2" style="color: var(--color-red);" onclick="window.deleteHistorySession('${k}')" title="Delete Test Session">🗑️</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
 }
 
-function runTimerCountdown(duration) {
-    clearInterval(timerInterval);
-    timeLeft = duration;
+window.downloadHistoryCsv = (historyId) => {
+    const h = sessionHistory[historyId];
+    if (!h || !h.topScores) return alert("No player data for this session.");
+    
+    const teamMap = {};
+    h.topScores.forEach(p => {
+        if (!p.team) return;
+        if (!teamMap[p.team]) teamMap[p.team] = 0;
+        teamMap[p.team] += (p.score || 0);
+    });
 
-    const timerUI = document.getElementById("host-timer");
-    timerUI.innerText = timeLeft;
-    timerUI.classList.remove("timer-warning");
-    timerUI.style.borderColor = THEME_COLORS.primary;
-    timerUI.style.boxShadow = `0 0 20px rgba(242, 200, 17, 0.3)`;
+    let csv = "Rank,Nickname,Score,Team,Team Score\n";
+    h.topScores.forEach((p, idx) => {
+        const teamObj = p.team ? TEAM_COLORS.find(t => t.key === p.team) : null;
+        const teamName = teamObj ? getTeamLabel(p.team) : "None";
+        const teamPoints = p.team ? (teamMap[p.team] || 0) : "";
+        csv += `${idx + 1},${p.name},${p.score},${teamName},${teamPoints}\n`;
+    });
+    
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.setAttribute('href', url);
+    a.setAttribute('download', `powerquiz_history_${new Date(h.date).toISOString().split('T')[0]}.csv`);
+    a.click();
+};
 
-    timerInterval = setInterval(() => {
-        if (isTimerPaused) return;
-        timeLeft--;
-        timerUI.innerText = timeLeft;
+window.deleteHistorySession = async (historyId) => {
+    if (!confirm("Are you sure you want to delete this session? This will update your top metrics.")) return;
+    const user = getCurrentUser();
+    if (user) {
+        await remove(ref(database, `users/${user.uid}/history/${historyId}`));
+    }
+};
 
-        if (timeLeft <= 5) {
-            timerUI.classList.add("timer-warning");
-            timerUI.style.borderColor = "#ef4444";
-            timerUI.style.boxShadow = `0 0 20px rgba(239, 68, 68, 0.6)`;
-            try { sfx.tick.currentTime = 0; sfx.tick.play(); } catch (e) { }
+function renderCustomQuizzes() {
+    const container = document.getElementById('custom-quizzes-list');
+    if (!container) return;
+    container.innerHTML = '';
+    const keys = Object.keys(customQuizzes);
+    if (keys.length === 0) {
+        container.innerHTML = '<p class="text-muted text-small text-center">No custom quizzes found.</p>';
+        return;
+    }
+    keys.forEach(key => {
+        const qz = customQuizzes[key];
+        const el = document.createElement('div');
+        el.className = 'card card-hover flex-between quiz-library-item';
+        el.style.padding = '1rem';
+        el.innerHTML = `
+            <div>
+                <strong>${qz.title}</strong>
+                <div class="text-small text-muted mt-2">${qz.questions.length} questions</div>
+            </div>
+            <div class="flex gap-2 quiz-library-actions">
+                <button class="btn btn-secondary" onclick="window.editQuiz('${key}')" title="Edit Quiz">✎</button>
+                <button class="btn btn-secondary" onclick="window.deleteQuiz('${key}')" style="color:var(--color-red);" title="Delete Quiz">×</button>
+                <button class="btn btn-primary" onclick="window.startCustomQuiz('${key}')">Host</button>
+            </div>
+        `;
+        container.appendChild(el);
+    });
+}
+
+// ==========================================
+// ADMIN / MAKER LOGIC
+// ==========================================
+const defaultMakerQuestion = () => ({ subject: 'powerbi', type: 'multiple-choice', text: '', options: ['', '', '', ''], words: [], answerText: '', targetNumber: 50, min: 0, max: 100, equation: '', values: [0, 0, 0, 0], chartType: 'bar', metric: 'Value', unitPrefix: '', correct: 0, timeLimit: 20, isDoublePoints: false, imageUrl: null });
+
+window.editQuiz = (key) => {
+    const qz = customQuizzes[key];
+    currentEditingQuizId = key;
+    makerQuestions = JSON.parse(JSON.stringify(qz.questions)).map(q => ({ ...defaultMakerQuestion(), ...q }));
+    document.getElementById('maker-quiz-title').value = qz.title;
+    renderMakerQuestions();
+    switchView('view-admin-maker');
+};
+
+window.deleteQuiz = async (key) => {
+    if (confirm("Are you sure you want to delete this quiz?")) {
+        const user = getCurrentUser();
+        await remove(ref(database, `users/${user.uid}/quizzes/${key}`));
+    }
+};
+
+window.updateMakerValue = (idx, optIdx, val) => { makerQuestions[idx].values[optIdx] = parseInt(val) || 0; };
+
+window.moveMakerQuestion = (idx, dir) => {
+    const targetIdx = idx + dir;
+    if (targetIdx < 0 || targetIdx >= makerQuestions.length) return;
+    const temp = makerQuestions[idx];
+    makerQuestions[idx] = makerQuestions[targetIdx];
+    makerQuestions[targetIdx] = temp;
+    
+    const tempCollapse = makerCollapsed[idx];
+    makerCollapsed[idx] = makerCollapsed[targetIdx];
+    makerCollapsed[targetIdx] = tempCollapse;
+    
+    renderMakerQuestions();
+};
+
+window.toggleMakerCollapse = (idx) => {
+    makerCollapsed[idx] = !makerCollapsed[idx];
+    renderMakerQuestions();
+};
+
+window.autoGenerateMakerQuestion = (idx) => {
+    const q = makerQuestions[idx];
+    const type = normalizeQuestionType(q);
+    if (type !== 'dashboard') {
+        const subject = q.subject || 'powerbi';
+        const candidates = RANDOM_QUESTION_BANK[subject]?.[type] || RANDOM_QUESTION_BANK[subject]?.['multiple-choice'] || [];
+        if (!candidates.length) return showToast('No random example is available for this type yet.', '#b45309');
+        const generated = candidates[Math.floor(Math.random() * candidates.length)];
+        makerQuestions[idx] = {
+            ...defaultMakerQuestion(),
+            ...JSON.parse(JSON.stringify(generated)),
+            type,
+            subject,
+            timeLimit: q.timeLimit || 20
+        };
+        renderMakerQuestions();
+        return;
+    }
+    const preset = getRandomScenarioPreset();
+    makerQuestions[idx].text = `Tap the category with the HIGHEST ${preset.metric}`;
+    makerQuestions[idx].metric = preset.metric;
+    makerQuestions[idx].unitPrefix = preset.unit;
+    makerQuestions[idx].options = [...preset.labels];
+    makerQuestions[idx].values = [...preset.values];
+    
+    let maxVal = -Infinity;
+    let maxIdx = 0;
+    preset.values.forEach((v, i) => {
+        if (v > maxVal) { maxVal = v; maxIdx = i; }
+    });
+    makerQuestions[idx].correct = maxIdx;
+    
+    renderMakerQuestions();
+};
+
+function renderMakerQuestions() {
+    const container = document.getElementById('maker-questions-container');
+    if (!container) return;
+    container.innerHTML = '';
+    makerQuestions.forEach((q, idx) => {
+        if (makerCollapsed[idx] === undefined) makerCollapsed[idx] = false;
+        
+        const el = document.createElement('div');
+        el.className = 'maker-q-card fade-in-up';
+        
+        let headerInner = `
+            <div class="maker-q-header" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; padding: 0.5rem 0;" onclick="if(event.target.tagName !== 'BUTTON' && event.target.tagName !== 'SELECT') window.toggleMakerCollapse(${idx});">
+                <h3 style="margin: 0; font-size: 1.05rem;">Q${idx + 1}: <span style="font-weight: normal; opacity: 0.8; font-size: 0.9rem;">${q.text || '(Untitled Question)'}</span></h3>
+                <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; justify-content: flex-end;" onclick="event.stopPropagation();">
+                    <button class="btn btn-secondary text-small" onclick="window.moveMakerQuestion(${idx}, -1)" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; margin: 0;">▲</button>
+                    <button class="btn btn-secondary text-small" onclick="window.moveMakerQuestion(${idx}, 1)" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; margin: 0;">▼</button>
+                    <select onchange="window.updateMakerQ(${idx}, 'type', this.value);" style="padding: 0.3rem; border-radius: 4px; background: rgba(0,0,0,0.4); color: white; border: 1px solid rgba(255,255,255,0.1); font-size: 0.8rem;">
+                        <option value="multiple-choice" ${q.type === 'multiple-choice' || q.type === 'text' ? 'selected' : ''}>🔠 Multiple Choice</option>
+                        <option value="true-false" ${q.type === 'true-false' ? 'selected' : ''}>✅ True / False</option>
+                        <option value="jumbled-prompt" ${q.type === 'jumbled-prompt' ? 'selected' : ''}>🔀 Arrange in Order</option>
+                        <option value="type-answer" ${q.type === 'type-answer' ? 'selected' : ''}>⌨️ Exact Answer</option>
+                        <option value="number-guess" ${q.type === 'number-guess' ? 'selected' : ''}>🎯 Number Estimate</option>
+                        <option value="poll" ${q.type === 'poll' ? 'selected' : ''}>📊 Poll</option>
+                        <option value="speed-math" ${q.type === 'speed-math' ? 'selected' : ''}>⚡ Missing Elements</option>
+                        <option value="dashboard" ${q.type === 'dashboard' ? 'selected' : ''}>📊 Dashboard</option>
+                    </select>
+                    <button class="btn-delete-q" onclick="window.deleteMakerQuestion(${idx})" style="position: static; font-size: 1.2rem; padding: 0.1rem 0.4rem;">×</button>
+                </div>
+            </div>
+        `;
+
+        let bodyInner = '';
+        const makerActions = `
+            <div class="flex gap-2 mt-2 mb-2">
+                <button class="btn btn-secondary" onclick="window.previewMakerChart(${idx})" style="flex:1; margin:0; padding:0.45rem;">👁 Preview Question</button>
+                <button class="btn btn-secondary" onclick="window.autoGenerateMakerQuestion(${idx})" style="flex:1; margin:0; padding:0.45rem; border-color:var(--color-primary); color:var(--color-primary);">🎲 Random Content</button>
+            </div>`;
+        if (!makerCollapsed[idx]) {
+            if (q.type === 'dashboard') {
+                bodyInner = `
+                    <div class="mt-3">
+                        <input type="text" placeholder="Question Text (e.g. 'Tap the highest value')" value="${q.text}" oninput="window.updateMakerQ(${idx}, 'text', this.value)" class="mb-3">
+                        
+                        <div class="flex-between mb-2">
+                            <span class="text-small text-muted">Time Limit (s):</span>
+                            <select onchange="window.updateMakerQ(${idx}, 'timeLimit', parseInt(this.value))" style="padding: 0.25rem 0.5rem; border-radius: 4px;">
+                                <option value="10" ${q.timeLimit===10?'selected':''}>10s</option>
+                                <option value="20" ${q.timeLimit===20?'selected':''}>20s</option>
+                                <option value="30" ${q.timeLimit===30?'selected':''}>30s</option>
+                                <option value="45" ${q.timeLimit===45?'selected':''}>45s</option>
+                                <option value="60" ${q.timeLimit===60?'selected':''}>60s</option>
+                            </select>
+                        </div>
+
+                        <div class="flex-between gap-2 mb-3 mt-3">
+                            <select onchange="window.updateMakerQ(${idx}, 'chartType', this.value)" style="flex: 1; padding: 0.5rem; border-radius: 4px; background: #0f172a; border: 1px solid rgba(255,255,255,0.1); color: white;">
+                                <option value="bar" ${q.chartType === 'bar' ? 'selected' : ''}>Bar Chart</option>
+                                <option value="line" ${q.chartType === 'line' ? 'selected' : ''}>Line Chart</option>
+                                <option value="pie" ${q.chartType === 'pie' ? 'selected' : ''}>Pie Chart</option>
+                                <option value="polarArea" ${q.chartType === 'polarArea' ? 'selected' : ''}>Polar Chart</option>
+                                <option value="kpi" ${q.chartType === 'kpi' ? 'selected' : ''}>KPI Grid</option>
+                            </select>
+                            <input type="text" placeholder="Metric (e.g. Profit)" value="${q.metric || ''}" oninput="window.updateMakerQ(${idx}, 'metric', this.value)" style="flex: 1; margin: 0;">
+                            <input type="text" placeholder="Prefix ($)" value="${q.unitPrefix || ''}" oninput="window.updateMakerQ(${idx}, 'unitPrefix', this.value)" style="flex: 0.5; margin: 0;">
+                        </div>
+                        
+                        <div class="flex gap-2 mb-3">
+                            <button class="btn btn-secondary" onclick="window.previewMakerChart(${idx})" style="flex: 1; padding: 0.5rem; margin: 0; font-size: 0.8rem;">👁️ Preview Chart</button>
+                            <button class="btn btn-secondary" onclick="window.autoGenerateMakerQuestion(${idx})" style="flex: 1; padding: 0.5rem; margin: 0; font-size: 0.8rem; border-color: var(--color-primary); color: var(--color-primary);">🎲 Auto-Generate Data</button>
+                        </div>
+
+                        <div class="maker-options-grid mt-2">
+                            <div class="text-small text-muted mb-1" style="grid-column: 1 / -1; display: flex; gap: 0.5rem;">
+                                <span style="width: 24px; text-align: center;">✅</span>
+                                <span style="flex: 1;">Data Label</span>
+                                <span style="flex: 1;">Numerical Value</span>
+                            </div>
+                            ${[0,1,2,3].map(i => `
+                            <div class="maker-option-row" style="display: flex; gap: 0.5rem; align-items: center; background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px;">
+                                <input type="radio" name="correct-${idx}" ${q.correct===i?'checked':''} onchange="window.updateMakerQ(${idx}, 'correct', ${i})" style="width: 24px; height: 24px; accent-color: var(--color-primary); cursor: pointer;">
+                                <input type="text" placeholder="Label ${i+1}" value="${q.options[i] || ''}" oninput="window.updateMakerOption(${idx}, ${i}, this.value)" style="flex: 1; margin: 0;">
+                                <input type="number" placeholder="Value" value="${q.values[i] || ''}" oninput="window.updateMakerValue(${idx}, ${i}, this.value)" style="flex: 1; margin: 0;">
+                            </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            } else if (['jumbled-prompt', 'type-answer', 'number-guess', 'speed-math'].includes(q.type)) {
+                let specialField = '';
+                if (q.type === 'jumbled-prompt') {
+                    specialField = `<input type="text" placeholder="Correct order, separated by commas" value="${(q.words || []).join(', ')}" oninput="window.updateMakerWords(${idx}, this.value)">`;
+                } else if (q.type === 'type-answer') {
+                    specialField = `<input type="text" placeholder="Exact answer" value="${q.answerText || ''}" oninput="window.updateMakerQ(${idx}, 'answerText', this.value)">`;
+                } else if (q.type === 'number-guess') {
+                    specialField = `<div class="flex gap-2"><input type="number" placeholder="Correct number" value="${q.targetNumber ?? 0}" oninput="window.updateMakerQ(${idx}, 'targetNumber', Number(this.value))"><input type="number" placeholder="Minimum" value="${q.min ?? 0}" oninput="window.updateMakerQ(${idx}, 'min', Number(this.value))"><input type="number" placeholder="Maximum" value="${q.max ?? 100}" oninput="window.updateMakerQ(${idx}, 'max', Number(this.value))"></div>`;
+                } else {
+                    specialField = `<input type="text" placeholder="Required elements, separated by commas" value="${q.equation || ''}" oninput="window.updateMakerQ(${idx}, 'equation', this.value)">`;
+                }
+                bodyInner = `
+                    <div class="mt-3">
+                        <input type="text" placeholder="Question Text" value="${q.text || ''}" oninput="window.updateMakerQ(${idx}, 'text', this.value)" class="mb-3">
+                        ${specialField}
+                        <div class="flex-between mt-2">
+                            <span class="text-small text-muted">Time Limit</span>
+                            <select onchange="window.updateMakerQ(${idx}, 'timeLimit', Number(this.value))">
+                                ${[10,15,20,30,45,60].map(seconds => `<option value="${seconds}" ${q.timeLimit===seconds?'selected':''}>${seconds}s</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>`;
+            } else {
+                bodyInner = `
+                    <div class="mt-3">
+                        <input type="text" placeholder="Question Text" value="${q.text}" oninput="window.updateMakerQ(${idx}, 'text', this.value)" class="mb-3">
+                        <div class="flex-between mb-2">
+                            <span class="text-small text-muted">Time Limit (s):</span>
+                            <select onchange="window.updateMakerQ(${idx}, 'timeLimit', parseInt(this.value))" style="padding: 0.25rem 0.5rem; border-radius: 4px;">
+                                <option value="10" ${q.timeLimit===10?'selected':''}>10s</option>
+                                <option value="20" ${q.timeLimit===20?'selected':''}>20s</option>
+                                <option value="30" ${q.timeLimit===30?'selected':''}>30s</option>
+                                <option value="60" ${q.timeLimit===60?'selected':''}>60s</option>
+                            </select>
+                        </div>
+                        <div class="flex-between mb-2" style="background: rgba(255,230,0,0.1); padding: 0.5rem; border-radius: var(--radius-sm); border: 1px solid var(--color-primary);">
+                            <label style="color: var(--color-primary); font-weight: bold; cursor: pointer;">
+                                <input type="checkbox" ${q.isDoublePoints?'checked':''} onchange="window.updateMakerQ(${idx}, 'isDoublePoints', this.checked)" style="accent-color: var(--color-primary);"> 
+                                Double Points Power-Up!
+                            </label>
+                        </div>
+                        <div class="mb-3" style="background: rgba(255,255,255,0.05); padding: 0.5rem; border-radius: var(--radius-sm);">
+                            <span class="text-small text-muted block mb-1">Optional Image:</span>
+                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                <input type="file" accept="image/*" onchange="window.uploadMakerImage(${idx}, this)" style="font-size: 0.8rem; color: white; flex: 1;">
+                                ${q.imageUrl ? `<button onclick="window.removeMakerImage(${idx})" style="background: none; border: 1px solid var(--color-red); color: var(--color-red); border-radius: var(--radius-sm); padding: 4px 8px; cursor: pointer; font-size: 0.75rem;">Remove</button>` : ''}
+                            </div>
+                            <div id="maker-img-status-${idx}" class="text-small mt-2" style="display: none;"></div>
+                            ${q.imageUrl ? `<img src="${q.imageUrl}" style="max-height: 100px; border-radius: var(--radius-sm); margin-top: 0.5rem; display: block; border: 2px solid var(--color-green);">
+                            <span class="text-small" style="color: var(--color-green);">✅ Image attached</span>` : ''}
+                        </div>
+                        <div class="maker-options-grid mt-2">
+                            <div class="maker-option-row">
+                                <input type="radio" name="correct-${idx}" ${q.correct===0?'checked':''} onchange="window.updateMakerQ(${idx}, 'correct', 0)">
+                                <input type="text" placeholder="Answer A (Red)" value="${q.options[0] || ''}" oninput="window.updateMakerOption(${idx}, 0, this.value)">
+                            </div>
+                            <div class="maker-option-row">
+                                <input type="radio" name="correct-${idx}" ${q.correct===1?'checked':''} onchange="window.updateMakerQ(${idx}, 'correct', 1)">
+                                <input type="text" placeholder="Answer B (Blue)" value="${q.options[1] || ''}" oninput="window.updateMakerOption(${idx}, 1, this.value)">
+                            </div>
+                            <div class="maker-option-row">
+                                <input type="radio" name="correct-${idx}" ${q.correct===2?'checked':''} onchange="window.updateMakerQ(${idx}, 'correct', 2)">
+                                <input type="text" placeholder="Answer C (Yellow)" value="${q.options[2] || ''}" oninput="window.updateMakerOption(${idx}, 2, this.value)">
+                            </div>
+                            <div class="maker-option-row">
+                                <input type="radio" name="correct-${idx}" ${q.correct===3?'checked':''} onchange="window.updateMakerQ(${idx}, 'correct', 3)">
+                                <input type="text" placeholder="Answer D (Green)" value="${q.options[3] || ''}" oninput="window.updateMakerOption(${idx}, 3, this.value)">
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        
+        if (!makerCollapsed[idx]) bodyInner = makerActions + bodyInner;
+        el.innerHTML = headerInner + bodyInner;
+        container.appendChild(el);
+    });
+}
+
+window.deleteMakerQuestion = (idx) => { makerQuestions.splice(idx, 1); makerCollapsed.splice(idx, 1); renderMakerQuestions(); };
+window.updateMakerQ = (idx, field, val) => { 
+    makerQuestions[idx][field] = val; 
+    if (field === 'type') {
+        if (val === 'true-false') {
+            makerQuestions[idx].options = ['True', 'False'];
+            makerQuestions[idx].correct = 0;
+        } else if (val === 'multiple-choice' && makerQuestions[idx].options.length < 4) {
+            makerQuestions[idx].options = ['', '', '', ''];
+        }
+        renderMakerQuestions();
+    }
+};
+window.updateMakerOption = (idx, optIdx, val) => { makerQuestions[idx].options[optIdx] = val; };
+window.updateMakerWords = (idx, value) => {
+    makerQuestions[idx].words = value.split(',').map(item => item.trim()).filter(Boolean);
+};
+
+let previewChartInstance = null;
+window.previewMakerChart = (idx) => {
+    const q = makerQuestions[idx];
+    if (!q) return;
+
+    const modal = document.getElementById('modal-chart-preview');
+    modal.classList.remove('hidden');
+    const generic = document.getElementById('preview-generic-content');
+    const canvas = document.getElementById('preview-chart-canvas');
+    const canvasPanel = canvas.parentElement;
+    const type = normalizeQuestionType(q);
+    
+    document.getElementById('preview-chart-question').innerText = q.text || 'Tap the correct element';
+    if (type !== 'dashboard') {
+        if (previewChartInstance) previewChartInstance.destroy();
+        canvasPanel.classList.add('hidden');
+        generic.classList.remove('hidden');
+        generic.innerHTML = '';
+        const typeLine = document.createElement('div');
+        typeLine.className = 'player-question-subject';
+        typeLine.textContent = `${questionSubject(q)} · ${type.replaceAll('-', ' ')}`;
+        const answerLine = document.createElement('p');
+        answerLine.style.marginTop = '0.75rem';
+        answerLine.textContent = type === 'poll' ? 'Unscored opinion question' : `Expected answer: ${getCorrectAnswerText(q) || 'Not set'}`;
+        generic.append(typeLine, answerLine);
+        if (q.options?.length) {
+            const list = document.createElement('ol');
+            q.options.forEach(option => {
+                const item = document.createElement('li');
+                item.textContent = option;
+                list.appendChild(item);
+            });
+            generic.appendChild(list);
+        }
+        document.getElementById('preview-chart-title').innerText = 'Question Preview';
+        return;
+    }
+    generic.classList.add('hidden');
+    canvasPanel.classList.remove('hidden');
+    document.getElementById('preview-chart-title').innerText = `${q.chartType.charAt(0).toUpperCase() + q.chartType.slice(1)} Chart Preview`;
+    
+    const ctx = canvas.getContext('2d');
+    if (previewChartInstance) previewChartInstance.destroy();
+    
+    const labels = q.options.map((o, i) => o || `Label ${i + 1}`);
+    const values = q.values.map(v => v || 0);
+    const correctIdx = q.correct || 0;
+    const prefix = q.unitPrefix || '';
+    const metric = q.metric || 'Value';
+    
+    let backgroundColors = [];
+    let borderColors = [];
+    
+    for (let i = 0; i < 4; i++) {
+        if (i === correctIdx) {
+            backgroundColors.push('rgba(16, 185, 129, 0.7)');
+            borderColors.push('rgba(16, 185, 129, 1)');
+        } else {
+            backgroundColors.push('rgba(59, 130, 246, 0.4)');
+            borderColors.push('rgba(59, 130, 246, 0.8)');
+        }
+    }
+    
+    let config = {
+        type: q.chartType === 'pie' ? 'doughnut' : q.chartType,
+        data: {
+            labels: labels,
+            datasets: [{
+                label: metric,
+                data: values,
+                backgroundColor: q.chartType === 'pie' ? ['rgba(239, 68, 68, 0.7)', 'rgba(59, 130, 246, 0.7)', 'rgba(245, 158, 11, 0.7)', 'rgba(16, 185, 129, 0.7)'] : backgroundColors,
+                borderColor: q.chartType === 'pie' ? ['#ef4444', '#3b82f6', '#f59e0b', '#10b981'] : borderColors,
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: q.chartType === 'pie', labels: { color: 'white' } },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) { return ` ${metric}: ${prefix}${context.parsed.y !== undefined ? context.parsed.y : context.parsed}`; }
+                    }
+                },
+                datalabels: { color: '#fff', font: { weight: 'bold', size: 12 }, formatter: (value) => prefix + value }
+            },
+            scales: q.chartType === 'pie' ? {} : {
+                x: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: 'white' } },
+                y: { grid: { color: 'rgba(255,255,255,0.1)' }, ticks: { color: 'white' } }
+            }
+        }
+    };
+    
+    previewChartInstance = new Chart(ctx, config);
+};
+
+window.removeMakerImage = (idx) => {
+    makerQuestions[idx].imageUrl = null;
+    renderMakerQuestions();
+};
+
+window.uploadMakerImage = async (idx, inputEl) => {
+    const file = inputEl.files[0];
+    if (!file) return;
+
+    const statusEl = document.getElementById(`maker-img-status-${idx}`);
+    if (statusEl) {
+        statusEl.style.display = 'block';
+        statusEl.style.color = 'var(--color-primary)';
+        statusEl.innerText = '⏳ Processing image...';
+    }
+    inputEl.disabled = true;
+
+    try {
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const MAX_DIM = 600;
+                    let w = img.width, h = img.height;
+                    if (w > MAX_DIM || h > MAX_DIM) {
+                        if (w > h) { h = Math.round(h * MAX_DIM / w); w = MAX_DIM; }
+                        else { w = Math.round(w * MAX_DIM / h); h = MAX_DIM; }
+                    }
+                    canvas.width = w;
+                    canvas.height = h;
+                    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                    resolve(canvas.toDataURL('image/jpeg', 0.6));
+                };
+                img.onerror = () => reject(new Error('Failed to load image'));
+                img.src = e.target.result;
+            };
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsDataURL(file);
+        });
+
+        makerQuestions[idx].imageUrl = dataUrl;
+        renderMakerQuestions();
+    } catch (err) {
+        alert('Image processing failed: ' + err.message);
+        if (statusEl) {
+            statusEl.style.color = 'var(--color-red)';
+            statusEl.innerText = '❌ Failed — try a smaller image';
+        }
+        inputEl.disabled = false;
+    }
+};
+
+window.startCustomQuiz = (key) => {
+    const isMixed = document.getElementById('toggle-mixed-mode')?.checked;
+    const baseQuestions = customQuizzes[key].questions;
+    
+    const processedBaseQuestions = baseQuestions.map(q => {
+        if (q.type === 'dashboard') {
+            return {
+                text: q.text,
+                correctIndex: q.correct,
+                timeLimit: q.timeLimit,
+                dashboardData: {
+                    scenarioTitle: "Custom Dashboard",
+                    question: q.text,
+                    metric: q.metric || "Value",
+                    unit: q.unitPrefix || "",
+                    unitSuffix: "",
+                    chartType: q.chartType || "bar",
+                    labels: q.options.map(opt => opt || " "),
+                    values: q.values.map(v => parseInt(v) || 0),
+                    correctIndex: q.correct,
+                    timeLimit: q.timeLimit
+                }
+            };
+        }
+        return q;
+    });
+
+    if (isMixed) {
+        currentGameMode = 'mixed';
+        const difficulty = document.getElementById('dash-difficulty')?.value || 'normal';
+        const dashRounds = generateDashboardGame(processedBaseQuestions.length, difficulty);
+        
+        questions = [];
+        for (let i = 0; i < processedBaseQuestions.length; i++) {
+            questions.push(processedBaseQuestions[i]);
+            const r = dashRounds[i];
+            questions.push({ text: r.question, correctIndex: r.correctIndex, timeLimit: r.timeLimit, dashboardData: serializeRound(r) });
+        }
+    } else {
+        currentGameMode = 'classic';
+        questions = processedBaseQuestions;
+    }
+    
+    currentHostedQuizTitle = customQuizzes[key].title + (isMixed ? ' (Mixed)' : '');
+    setupGameLobby();
+};
+
+async function setupGameLobby() {
+    if (!isFirebaseEnabled) return alert("Firebase is not connected.");
+    
+    isHost = true;
+    if (!IS_SIMULATOR_CLIENT) sessionStorage.removeItem('dashboard_wars_player_session');
+    let sessionRef;
+    for (let attempt = 0; attempt < 12; attempt++) {
+        const candidate = generatePin();
+        const candidateRef = ref(database, `sessions/${candidate}`);
+        const reservation = await runTransaction(candidateRef, current => current === null ? {
+            state: 'lobby',
+            mode: currentGameMode,
+            teamMode: false,
+            teamCount: 4,
+            teamLabelMode: 'groups',
+            currentQuestionIndex: 0,
+            questions,
+            questionStartTime: 0,
+            answersCount: { 0: 0, 1: 0, 2: 0, 3: 0 },
+            totalAnswers: 0,
+            createdAt: Date.now()
+        } : undefined);
+        if (reservation.committed) {
+            currentGamePin = candidate;
+            sessionRef = candidateRef;
+            break;
+        }
+    }
+    if (!sessionRef) return alert('Could not reserve a game PIN. Please try again.');
+    sessionStorage.setItem('dashboard_wars_host_session', JSON.stringify({
+        pin: currentGamePin,
+        title: currentHostedQuizTitle,
+        questions,
+        mode: currentGameMode
+    }));
+
+    if (currentGameMode === 'dashboard') {
+        document.getElementById('lobby-mode-badge')?.classList.remove('hidden');
+    } else {
+        document.getElementById('lobby-mode-badge')?.classList.add('hidden');
+    }
+
+    document.getElementById('display-game-pin').innerText = currentGamePin;
+    document.getElementById('display-join-url').innerHTML = `Join at <strong>${window.location.host}</strong> with PIN:`;
+    
+    const qrContainer = document.getElementById('qr-code-container');
+    qrContainer.innerHTML = '';
+    new QRCode(qrContainer, {
+        text: window.location.href.split('?')[0] + "?pin=" + currentGamePin,
+        width: 150, height: 150,
+        colorDark : "#1A1A24", colorLight : "#ffffff",
+        correctLevel : QRCode.CorrectLevel.H
+    });
+
+    switchView('view-host-lobby');
+
+    onChildAdded(ref(database, `sessions/${currentGamePin}/reactions`), (snapshot) => {
+        const data = snapshot.val();
+        if (data && data.emoji) spawnFloatingEmoji(data.emoji);
+    });
+
+    onChildAdded(ref(database, `sessions/${currentGamePin}/chat`), (snapshot) => {
+        const msg = snapshot.val();
+        if (msg) spawnSmackTalk(msg.text, msg.name);
+    });
+
+    onValue(ref(database, `sessions/${currentGamePin}/hype`), (snapshot) => {
+        const h = snapshot.val() || 0;
+        const target = Math.max(10, Object.keys(lobbyPlayers || {}).length * 15);
+        const pct = Math.min(100, (h / target) * 100);
+        
+        const bar = document.getElementById('host-hype-bar');
+        const txt = document.getElementById('host-hype-text');
+        if (bar) bar.style.width = pct + '%';
+        
+        if (h >= target && h > 0) {
+            if (txt) txt.innerText = "DOUBLE POINTS UNLOCKED!";
+            if (bar) bar.style.background = 'linear-gradient(90deg, #ffd700, #ff8c00)';
+            update(ref(database, `sessions/${currentGamePin}`), { nextDoublePoints: true });
+        } else {
+            if (txt) txt.innerText = "Mash HYPE to unlock Double Points!";
+            if (bar) bar.style.background = 'linear-gradient(90deg, #ff416c, #ff4b2b)';
+        }
+    });
+
+    onChildAdded(ref(database, `sessions/${currentGamePin}/attacks`), (snapshot) => {
+        const attack = snapshot.val();
+        if (attack) {
+            const toastContainer = document.getElementById('host-attacks-container');
+            if (toastContainer) {
+                const toast = document.createElement('div');
+                toast.className = 'host-attack-toast fade-in-up';
+                
+                let icon = '⚡';
+                if (attack.type === 'blur') icon = '🌫️';
+                else if (attack.type === 'shuffle') icon = '🔀';
+                else if (attack.type === 'glitch') icon = '📺';
+                else if (attack.type === 'emoji_flood') icon = '🎈';
+                else if (attack.type === 'steal') icon = '💰';
+                else if (attack.type === 'freeze') icon = '⏳';
+                else if (attack.type === 'redacted') icon = '🕵️';
+                
+                toast.innerHTML = `
+                    <div style="font-size: 1.25rem; margin-right: 0.5rem;">${icon}</div>
+                    <div>
+                        <strong style="color: var(--color-primary);">${attack.attackerName}</strong> 
+                        used <strong>${attack.type.toUpperCase().replace('_', ' ')}</strong> 
+                        on <strong style="color: var(--color-green);">${attack.targetName}</strong>!
+                    </div>
+                    <button type="button" aria-label="Clear notification">Clear</button>
+                `;
+                toastContainer.appendChild(toast);
+                toast.querySelector('button')?.addEventListener('click', () => toast.remove());
+            }
+        }
+    });
+
+    let lobbyPlayers = {};
+    const renderHostLobbyPlayers = () => {
+        const playerKeys = Object.keys(lobbyPlayers);
+        document.getElementById('player-count').innerText = playerKeys.length;
+        const listEl = document.getElementById('player-list');
+        if (!listEl) return;
+        listEl.innerHTML = '';
+        
+        playerKeys.forEach(key => {
+            const el = document.createElement('div');
+            const teamKey = teamModeEnabled ? (lobbyPlayers[key].team || '') : '';
+            el.className = `player-tag ${teamKey ? 'team-' + teamKey : ''}`;
+            const teamEmoji = teamKey ? formatTeamShort(teamKey) + ' ' : '';
+            el.innerHTML = `
+                <span>${teamEmoji}${lobbyPlayers[key].name}</span>
+                <button class="btn-kick" onclick="window.kickPlayer('${key}')">×</button>
+            `;
+            listEl.appendChild(el);
+        });
+
+        const startBtn = document.getElementById('btn-start-game');
+        if (startBtn) startBtn.disabled = playerKeys.length === 0;
+    };
+
+    onValue(ref(database, `sessions/${currentGamePin}/players`), (snapshot) => {
+        lobbyPlayers = snapshot.val() || {};
+        renderHostLobbyPlayers();
+    });
+
+    document.getElementById('toggle-team-mode').checked = false;
+    document.getElementById('select-team-count').classList.add('hidden');
+    document.getElementById('select-team-labels').classList.add('hidden');
+    document.getElementById('select-team-labels').value = 'groups';
+    currentTeamLabelMode = 'groups';
+    document.getElementById('toggle-team-mode').onchange = async (e) => {
+        teamModeEnabled = e.target.checked;
+        document.getElementById('select-team-count').classList.toggle('hidden', !teamModeEnabled);
+        document.getElementById('select-team-assign').classList.toggle('hidden', !teamModeEnabled);
+        document.getElementById('select-team-labels').classList.toggle('hidden', !teamModeEnabled);
+        const assignMode = document.getElementById('select-team-assign').value;
+        renderHostLobbyPlayers();
+        await update(ref(database, `sessions/${currentGamePin}`), {
+            teamMode: teamModeEnabled,
+            teamCount: parseInt(document.getElementById('select-team-count').value),
+            teamAssign: assignMode,
+            teamLabelMode: currentTeamLabelMode
+        });
+        if (teamModeEnabled && assignMode === 'auto') reassignTeams();
+    };
+
+    document.getElementById('select-team-count').onchange = async (e) => {
+        teamCount = parseInt(e.target.value);
+        const assignMode = document.getElementById('select-team-assign').value;
+        renderHostLobbyPlayers();
+        await update(ref(database, `sessions/${currentGamePin}`), { teamCount });
+        if (teamModeEnabled && assignMode === 'auto') reassignTeams();
+    };
+
+    document.getElementById('select-team-assign').onchange = async (e) => {
+        const assignMode = e.target.value;
+        renderHostLobbyPlayers();
+        await update(ref(database, `sessions/${currentGamePin}`), { teamAssign: assignMode });
+        if (assignMode === 'auto' && teamModeEnabled) reassignTeams();
+    };
+
+    document.getElementById('select-team-labels').onchange = async (e) => {
+        currentTeamLabelMode = e.target.value;
+        renderHostLobbyPlayers();
+        await update(ref(database, `sessions/${currentGamePin}`), { teamLabelMode: currentTeamLabelMode });
+    };
+
+    onValue(ref(database, `sessions/${currentGamePin}/totalAnswers`), (snapshot) => {
+        const total = snapshot.val() || 0;
+        document.getElementById('answers-count').innerText = `${total} Answers`;
+        if (document.getElementById('dash-answers-count')) document.getElementById('dash-answers-count').innerText = `${total} Answers`;
+        
+        get(ref(database, `sessions/${currentGamePin}/players`)).then(snap => {
+            const players = snap.val() || {};
+            const playerCount = Object.values(players).filter(player => player.online !== false).length;
+            if (playerCount > 0 && total >= playerCount && currentGameState === 'question') {
+                const q = questions[currentQuestionIndex];
+                if (q && q.dashboardData) {
+                    endDashboardQuestion();
+                } else {
+                    endQuestion();
+                }
+            }
+        });
+    });
+}
+
+window.kickPlayer = async (playerId) => {
+    await remove(ref(database, `sessions/${currentGamePin}/players/${playerId}`));
+};
+
+function startQuestion(index, recoverySession = null) {
+    clearSabotageEffectsForNextQuestion();
+    currentQuestionIndex = index;
+    const q = questions[index];
+    timeRemaining = recoverySession
+        ? Math.max(0, (q.timeLimit || 20) - Math.floor((Date.now() - (recoverySession.questionStartTime || Date.now())) / 1000))
+        : q.timeLimit;
+    currentGameState = 'question';
+    
+    if (!recoverySession) {
+    update(ref(database, `sessions/${currentGamePin}`), {
+        state: 'question',
+        currentQuestionIndex: index,
+        questionStartTime: Date.now(),
+        answersCount: { 0: 0, 1: 0, 2: 0, 3: 0 },
+        totalAnswers: 0,
+        isPaused: false,
+        resultAnswer: null,
+        answers: null
+    });
+
+    get(ref(database, `sessions/${currentGamePin}/queuedAttacks`)).then(async (snap) => {
+        const queued = snap.val();
+        if (queued) {
+            const updates = {};
+            Object.keys(queued).forEach(key => {
+                const atk = queued[key];
+                const newAtkRef = push(ref(database, `sessions/${currentGamePin}/attacks`));
+                updates[`attacks/${newAtkRef.key}`] = { ...atk, timestamp: Date.now() };
+            });
+            await update(ref(database, `sessions/${currentGamePin}`), updates);
+            await remove(ref(database, `sessions/${currentGamePin}/queuedAttacks`));
+        }
+    });
+
+    document.getElementById('btn-pause-timer').classList.remove('hidden');
+    document.getElementById('btn-resume-timer').classList.add('hidden');
+
+    get(ref(database, `sessions/${currentGamePin}/players`)).then(snapshot => {
+        const players = snapshot.val() || {};
+        const updates = {};
+        const sortedKeys = Object.keys(players).sort((a, b) => (players[b].score || 0) - (players[a].score || 0));
+        sortedKeys.forEach((key, idx) => {
+            updates[`players/${key}/previousRank`] = idx + 1;
+            updates[`players/${key}/hasAnswered`] = false;
+            updates[`players/${key}/answeredQuestionIndex`] = -1;
+            updates[`players/${key}/lastAnswerCorrect`] = false;
+            updates[`players/${key}/lastPointsEarned`] = 0;
+        });
+        update(ref(database, `sessions/${currentGamePin}`), updates);
+    });
+    }
+
+    document.getElementById('host-question-number').innerText = `Question ${index + 1} of ${questions.length}`;
+    document.getElementById('host-question-text').innerText = q.text || q.dashboardData?.question || 'Loading question...';
+    const type = normalizeQuestionType(q);
+    let hostChoices = q.options || [];
+    if (type === 'jumbled-prompt') hostChoices = q.words || [];
+    else if (type === 'type-answer') hostChoices = ['Players type the exact answer on their phone'];
+    else if (type === 'number-guess') hostChoices = [`Players choose a number from ${q.min ?? 0} to ${q.max ?? 100}`];
+    else if (type === 'speed-math') hostChoices = ['Players enter all required code or prompt elements'];
+    document.querySelectorAll('#view-host-question .host-answer-card').forEach((card, i) => {
+        card.classList.toggle('hidden', hostChoices[i] === undefined);
+    });
+    for (let i = 0; i < 4; i++) {
+        const label = document.getElementById(`host-ans-${i}`);
+        if (label) label.innerText = hostChoices[i] || '';
+    }
+    document.getElementById('host-timer').innerText = timeRemaining;
+    document.getElementById('answers-count').innerText = `${recoverySession?.totalAnswers || 0} Answers`;
+    
+    if (q.isDoublePoints) {
+        document.getElementById('host-question-header').style.background = 'linear-gradient(90deg, rgba(255,230,0,0.2) 0%, rgba(255,230,0,0.05) 100%)';
+        document.getElementById('host-question-header').style.borderLeft = '4px solid var(--color-primary)';
+        document.getElementById('host-timer').style.background = 'linear-gradient(45deg, #FFD700, #FFA500)';
+        const sfxPower = document.getElementById('sfx-powerup');
+        if(sfxPower) { sfxPower.currentTime = 0; sfxPower.play().catch(()=>{}); }
+    } else {
+        document.getElementById('host-question-header').style.background = 'var(--glass-bg)';
+        document.getElementById('host-question-header').style.borderLeft = 'none';
+        document.getElementById('host-timer').style.background = 'var(--color-primary)';
+    }
+
+    const imgContainer = document.getElementById('host-question-image-container');
+    const imgEl = document.getElementById('host-question-image');
+    if (q.imageUrl) {
+        imgEl.src = q.imageUrl;
+        imgContainer.classList.remove('hidden');
+    } else {
+        imgEl.src = '';
+        imgContainer.classList.add('hidden');
+    }
+
+    switchView('view-host-question');
+
+    clearInterval(hostTimerInterval);
+    hostTimerInterval = setInterval(() => {
+        timeRemaining--;
+        document.getElementById('host-timer').innerText = timeRemaining;
+        
+        if (timeRemaining <= 5 && timeRemaining > 0) {
+            document.getElementById('host-timer').classList.add('timer-warning');
+            const sfxTick = document.getElementById('sfx-tick');
+            if(sfxTick) { sfxTick.currentTime = 0; sfxTick.play().catch(()=>{}); }
+        } else {
+            document.getElementById('host-timer').classList.remove('timer-warning');
         }
 
-        if (timeLeft <= 0) {
-            clearInterval(timerInterval);
-            concludeQuestionEvaluation();
-        }
+        if (timeRemaining <= 0) endQuestion();
     }, 1000);
-
-    document.getElementById("btn-pause-timer").onclick = () => {
-        isTimerPaused = true;
-        document.getElementById("btn-pause-timer").classList.add("hidden");
-        document.getElementById("btn-resume-timer").classList.remove("hidden");
-    };
-
-    document.getElementById("btn-resume-timer").onclick = () => {
-        isTimerPaused = false;
-        document.getElementById("btn-resume-timer").classList.add("hidden");
-        document.getElementById("btn-pause-timer").classList.remove("hidden");
-    };
-
-    document.getElementById("btn-skip-question").onclick = () => {
-        clearInterval(timerInterval);
-        concludeQuestionEvaluation();
-    };
 }
 
-async function concludeQuestionEvaluation() {
-    if (questionConclusionInProgress) return;
+async function endQuestion() {
+    if (questionConclusionInProgress || currentGameState !== 'question') return;
     questionConclusionInProgress = true;
     try {
-        if (answersListener) { answersListener(); answersListener = null; }
-        const q = currentQuizData.questions[hostActiveQuestionIndex];
-
-        if (isFirebaseEnabled && Object.keys(hostAnswersMap).length === 0) {
-            const answersSnapshot = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers`));
-            hostAnswersMap = answersSnapshot.exists()
-                ? Object.fromEntries(
-                    Object.entries(answersSnapshot.val()).filter(([, answer]) => (
-                        answer.questionIndex === hostActiveQuestionIndex
-                    ))
-                )
-                : {};
-        }
-    
-    document.getElementById("host-results-chart").classList.add("hidden");
-    const jumbledResults = document.getElementById("host-results-jumbled");
-    const textResults = document.getElementById("host-results-text");
-    const numberResults = document.getElementById("host-results-number");
-    const mcCorrectAns = document.getElementById("host-mc-correct-answer");
-    if (mcCorrectAns) mcCorrectAns.classList.add("hidden");
-    
-    if (jumbledResults) jumbledResults.classList.add("hidden");
-    if (textResults) textResults.classList.add("hidden");
-    if (numberResults) numberResults.classList.add("hidden");
-
-    if (!q.type || q.type === "multiple-choice" || q.type === "true-false" || q.type === "poll") {
-        document.getElementById("host-results-chart").classList.remove("hidden");
-        if (mcCorrectAns && q.type !== "poll" && q.correct !== undefined && q.options && q.options[q.correct]) {
-            mcCorrectAns.classList.remove("hidden");
-            document.getElementById("host-mc-correct-text").innerText = q.options[q.correct];
-        }
-        const numOptions = (q.options && q.options.length) ? q.options.length : 4;
-        const distribution = Array(numOptions).fill(0);
-
-        Object.values(hostAnswersMap).forEach(ans => {
-            if (ans.optionIndex >= 0 && ans.optionIndex < numOptions) distribution[ans.optionIndex]++;
+        clearInterval(hostTimerInterval);
+        currentGameState = 'results';
+        const q = questions[currentQuestionIndex];
+        await update(ref(database, `sessions/${currentGamePin}`), {
+            state: 'results',
+            resultAnswer: getCorrectAnswerText(q),
+            resultQuestionType: normalizeQuestionType(q)
         });
-
-        const totalAnswers = Object.keys(hostAnswersMap).length || 1;
-        for (let i = 0; i < 4; i++) {
-            const barElement = document.getElementById(`bar-${i}`);
-            const barContainer = barElement ? barElement.parentElement : null;
-            if (barElement) {
-                if (barContainer) barContainer.style.opacity = "1";
-                if (i < numOptions) {
-                    if (barContainer) barContainer.classList.remove("hidden");
-                    const heightPercent = (distribution[i] / totalAnswers) * 100;
-                    barElement.style.height = `${heightPercent}%`;
-                    
-                    if (q.type !== "poll" && q.correct !== undefined) {
-                        if (i === q.correct) {
-                            barElement.nextElementSibling.innerHTML = `${distribution[i]} <span style="color:#22c55e;">✔</span>`;
-                        } else {
-                            barElement.nextElementSibling.innerText = distribution[i];
-                            if (barContainer) barContainer.style.opacity = "0.4";
-                        }
-                    } else {
-                        barElement.nextElementSibling.innerText = distribution[i];
-                    }
-                } else {
-                    if (barContainer) barContainer.classList.add("hidden");
-                }
-            }
-        }
-    } else if (q.type === "jumbled-prompt") {
-        if (jumbledResults) {
-            jumbledResults.classList.remove("hidden");
-            let correctCount = 0;
-            Object.values(hostAnswersMap).forEach(ans => {
-                if (ans.sequence && ans.sequence.join(',') === q.words.join(',')) correctCount++;
-            });
-            document.getElementById("host-jumbled-correct-count").innerText = `${correctCount} participants ordered it correctly!`;
-            const correctOrderEl = document.getElementById("host-jumbled-correct-order");
-            correctOrderEl.innerHTML = "";
-            q.words.forEach(w => {
-                const span = document.createElement("span");
-                span.className = "jumbled-word-chip correct";
-                span.innerText = w;
-                correctOrderEl.appendChild(span);
-            });
-        }
-    } else if (q.type === "type-answer") {
-        if (textResults) {
-            textResults.classList.remove("hidden");
-            let correctCount = 0;
-            Object.values(hostAnswersMap).forEach(ans => {
-                if (ans.textAnswer && ans.textAnswer.toLowerCase() === q.answerText.toLowerCase()) correctCount++;
-            });
-            document.getElementById("host-text-correct-count").innerText = `${correctCount} participants typed it correctly!`;
-            document.getElementById("host-text-correct-answer").innerText = q.answerText;
-        }
-    } else if (q.type === "number-guess") {
-        if (numberResults) {
-            numberResults.classList.remove("hidden");
-            document.getElementById("host-number-correct-answer").innerText = q.targetNumber;
-            
-            let closest = null;
-            let closestDiff = Infinity;
-            
-            Object.entries(hostAnswersMap).forEach(([pKey, ans]) => {
-                if (ans.numberAnswer !== undefined) {
-                    const diff = Math.abs(ans.numberAnswer - q.targetNumber);
-                    if (diff < closestDiff) {
-                        closestDiff = diff;
-                        closest = { pKey, val: ans.numberAnswer };
-                    }
-                }
-            });
-            
-            const closestMsg = document.getElementById("host-number-closest");
-            if (closest) {
-                closestMsg.innerText = `Closest prediction was ${closest.val} (off by ${closestDiff.toFixed(2)})!`;
-                if (closestDiff < 0.01) closestMsg.innerText = `Someone matched the value exactly!`;
-            } else {
-                closestMsg.innerText = `No values submitted.`;
-            }
-        }
-    } else if (q.type === "speed-math") {
-        if (textResults) {
-            textResults.classList.remove("hidden");
-            let correctCount = 0;
-            Object.values(hostAnswersMap).forEach(ans => {
-                if (ans.textAnswer !== undefined) {
-                    const ansLower = ans.textAnswer.toLowerCase();
-                    const keywords = q.equation.split(",").map(k => k.trim().toLowerCase()).filter(k => k);
-                    const allPresent = keywords.every(k => ansLower.includes(k));
-                    if (allPresent) correctCount++;
-                }
-            });
-            document.getElementById("host-text-correct-count").innerText = `${correctCount} participants included every required element!`;
-            document.getElementById("host-text-correct-answer").innerText = `Required: ${q.equation}`;
-        }
-    }
-
-        if (isFirebaseEnabled) {
-            let resultAnswer = "";
-            if (q.type === "jumbled-prompt") resultAnswer = q.words.join(" → ");
-            else if (q.type === "type-answer") resultAnswer = q.answerText;
-            else if (q.type === "number-guess") resultAnswer = String(q.targetNumber);
-            else if (q.type === "poll") resultAnswer = "Opinion recorded";
-            else if (q.type === "speed-math") resultAnswer = `Required elements: ${q.equation}`;
-            else if (q.options && q.correct !== undefined) resultAnswer = q.options[q.correct];
-
-            const scoreClaim = await runTransaction(
-                ref(database, `${SESSION_ROOT}/${currentSessionPin}/scoredQuestions/${hostActiveQuestionIndex}`),
-                current => current === null ? { scoredAt: Date.now() } : undefined
-            );
-            if (scoreClaim.committed) {
-                await evaluateSystemScoringTransactions(q.correct);
-            }
-            await update(gameSessionRef, {
-                status: "results",
-                "publicState/status": "results",
-                "publicState/resultAnswer": resultAnswer
-            });
-        }
-
-        try { sfx.ding.play(); } catch (e) { }
-        switchView("hostResults");
-        document.getElementById("btn-next-leaderboard").onclick = () => presentHostLeaderboardView();
+        const sfxDing = document.getElementById('sfx-ding');
+        if(sfxDing) { sfxDing.currentTime = 0; sfxDing.play().catch(()=>{}); }
+        showHostResults();
     } finally {
         questionConclusionInProgress = false;
     }
 }
 
-async function evaluateSystemScoringTransactions(correctIdx) {
-    const playersSnapshot = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players`));
-    if (!playersSnapshot.exists()) return;
+function showHostResults() {
+    switchView('view-host-results');
+    const q = questions[currentQuestionIndex];
+    const answerReveal = document.getElementById('host-correct-answer');
+    const answerText = document.getElementById('host-correct-answer-text');
+    if (answerReveal && answerText) {
+        answerText.textContent = getCorrectAnswerText(q);
+        answerReveal.classList.toggle('hidden', normalizeQuestionType(q) === 'poll');
+    }
+    document.getElementById('host-results-chart')?.classList.toggle(
+        'hidden',
+        !['multiple-choice', 'true-false', 'poll'].includes(normalizeQuestionType(q))
+    );
+    get(ref(database, `sessions/${currentGamePin}`)).then(snapshot => {
+        const data = snapshot.val();
+        const correctIdx = q.correct;
+        const counts = data.answersCount || { 0: 0, 1: 0, 2: 0, 3: 0 };
+        
+        let maxCount = Math.max(counts[0], counts[1], counts[2], counts[3], 1);
+        
+        for (let i = 0; i < 4; i++) {
+            document.getElementById(`bar-${i}`).style.height = '0%';
+            document.getElementById(`count-${i}`).innerText = '0';
+            document.getElementById(`pillar-container-${i}`).className = `pillar-container pillar-${['red','blue','yellow','green'][i]}`;
+        }
+        
+        for (let i = 0; i < 4; i++) {
+            const targetHeight = (counts[i] / maxCount) * 100;
+            const targetCount = counts[i];
+            
+            setTimeout(() => {
+                document.getElementById(`bar-${i}`).style.height = `${targetHeight}%`;
+                
+                let curr = 0;
+                const counter = setInterval(() => {
+                    if (curr >= targetCount) {
+                        clearInterval(counter);
+                        document.getElementById(`count-${i}`).innerText = targetCount;
+                        if (i === 3) {
+                            for (let j = 0; j < 4; j++) {
+                                if (j !== correctIdx) document.getElementById(`pillar-container-${j}`).classList.add('dimmed');
+                                else document.getElementById(`pillar-container-${j}`).classList.add('winner');
+                            }
+                        }
+                    } else {
+                        curr += Math.max(1, Math.floor(targetCount / 10));
+                        document.getElementById(`count-${i}`).innerText = Math.min(curr, targetCount);
+                    }
+                }, 50);
+            }, 500 + (i * 200));
+        }
+    });
+}
 
-    const playersData = playersSnapshot.val();
-    const updates = {};
+function showHostLeaderboard() {
+    switchView('view-host-leaderboard');
+    if (currentQuestionIndex + 1 >= questions.length && currentGameState !== 'game_over') {
+        document.getElementById('btn-next-question').innerText = "End Game";
+    } else if (currentGameState === 'game_over') {
+        document.getElementById('btn-next-question').innerText = "Game Ended";
+    }
 
-    Object.keys(playersData).forEach(pKey => {
-        const answerObj = hostAnswersMap[pKey];
-        let scoreIncrement = 0;
-        let answeredCorrectly = false;
+    // Clean up any stale special events from previous rounds
+    update(ref(database, `sessions/${currentGamePin}`), { activeEvent: null }).catch(() => {});
+    window.bossBattleEnding = false;
+    window.mysteryBoxEnding = false;
+    window.bossDefeatedRewarded = false;
+    if (window.bossInterval) { clearInterval(window.bossInterval); window.bossInterval = null; }
+    
+    renderHostLeaderboardContent();
 
-        const currentQ = currentQuizData.questions[hostActiveQuestionIndex];
-        if (currentQ.type === "jumbled-prompt") {
-            if (answerObj && answerObj.sequence && answerObj.sequence.join(',') === currentQ.words.join(',')) {
-                answeredCorrectly = true;
+    // Host-side listener for activeEvent (Boss Battle / Mystery Box)
+    if (window.hostEventUnsub) window.hostEventUnsub();
+    window.hostEventUnsub = onValue(ref(database, `sessions/${currentGamePin}`), (snapshot) => {
+        const d = snapshot.val();
+        if (!d) return;
+        const hostMysteryOverlay = document.getElementById('host-mystery-box-overlay');
+        const hostBossOverlay = document.getElementById('host-boss-battle-overlay');
+        if (hostMysteryOverlay) hostMysteryOverlay.classList.add('hidden');
+        if (hostBossOverlay) hostBossOverlay.classList.add('hidden');
+
+        if (d.activeEvent === 'mystery_box') {
+            if (hostMysteryOverlay) {
+                hostMysteryOverlay.classList.remove('hidden');
+                const res = document.getElementById('mystery-box-result');
+                if (d.mysteryBoxWinner) {
+                    const wName = d.players?.[d.mysteryBoxWinner]?.name || 'Someone';
+                    res.innerHTML = `🎉 ${wName} won the Mystery Box!`;
+                    res.classList.remove('hidden');
+                    if (!window.mysteryBoxEnding) {
+                        window.mysteryBoxEnding = true;
+                        setTimeout(() => {
+                            update(ref(database, `sessions/${currentGamePin}`), { activeEvent: null });
+                            window.mysteryBoxEnding = false;
+                            renderHostLeaderboardContent();
+                        }, 4000);
+                    }
+                } else {
+                    res.classList.add('hidden');
+                }
             }
-        } else if (currentQ.type === "type-answer") {
-            if (answerObj && answerObj.textAnswer && answerObj.textAnswer.toLowerCase() === currentQ.answerText.toLowerCase()) {
-                answeredCorrectly = true;
-            }
-        } else if (currentQ.type === "number-guess") {
-            if (answerObj && answerObj.numberAnswer !== undefined) {
-                const diff = Math.abs(answerObj.numberAnswer - currentQ.targetNumber);
-                if (diff <= 0.15) answeredCorrectly = true; 
-            }
-        } else if (currentQ.type === "poll") {
-            if (answerObj) answeredCorrectly = true; // Everyone who submitted is marked correct/active
-        } else if (currentQ.type === "speed-math") {
-            if (answerObj && answerObj.textAnswer !== undefined) {
-                const ansLower = answerObj.textAnswer.toLowerCase();
-                const keywords = currentQ.equation.split(",").map(k => k.trim().toLowerCase()).filter(k => k);
-                const allPresent = keywords.every(k => ansLower.includes(k));
-                if (allPresent) answeredCorrectly = true;
-            }
-        } else {
-            if (answerObj && answerObj.optionIndex === correctIdx) {
-                answeredCorrectly = true;
+        } else if (d.activeEvent === 'boss_battle') {
+            if (hostBossOverlay) {
+                hostBossOverlay.classList.remove('hidden');
+                const hp = d.bossHp ?? 1000;
+                const maxHp = d.bossMaxHp || 1000;
+                document.getElementById('host-boss-hp-bar').style.width = `${Math.max(0, (hp / maxHp) * 100)}%`;
+                document.getElementById('host-boss-hp-text').innerText = `${hp} / ${maxHp} HP`;
+
+                if (!window.bossInterval) {
+                    window.bossInterval = setInterval(() => {
+                        const elapsed = Math.floor((Date.now() - (d.eventStartTime || Date.now())) / 1000);
+                        const left = Math.max(0, 15 - elapsed);
+                        const timeEl = document.getElementById('host-boss-time-left');
+                        if (timeEl) timeEl.innerText = `Time left: ${left}s`;
+                        if (left <= 0 && !window.bossBattleEnding) {
+                            window.bossBattleEnding = true;
+                            clearInterval(window.bossInterval); window.bossInterval = null;
+                            const bossRes = document.getElementById('host-boss-result');
+                            if (bossRes) { bossRes.innerHTML = `💀 DEFEAT! Time's Up!`; bossRes.style.color = '#f87171'; bossRes.classList.remove('hidden'); }
+                            setTimeout(() => {
+                                update(ref(database, `sessions/${currentGamePin}`), { activeEvent: null });
+                                window.bossBattleEnding = false;
+                                renderHostLeaderboardContent();
+                            }, 5000);
+                        }
+                    }, 500);
+                }
+
+                const bossRes = document.getElementById('host-boss-result');
+                if (hp <= 0) {
+                    if (window.bossInterval) { clearInterval(window.bossInterval); window.bossInterval = null; }
+                    bossRes.innerHTML = `✨ VICTORY! Boss Defeated!`;
+                    bossRes.style.color = '#4ade80';
+                    bossRes.classList.remove('hidden');
+                    if (!window.bossDefeatedRewarded) {
+                        window.bossDefeatedRewarded = true;
+                        get(ref(database, `sessions/${currentGamePin}/players`)).then(pSnap => {
+                            if (pSnap.exists()) {
+                                const players = pSnap.val();
+                                const updates = {};
+                                Object.keys(players).forEach(pId => {
+                                    updates[`players/${pId}/score`] = (players[pId].score || 0) + 1500;
+                                });
+                                update(ref(database, `sessions/${currentGamePin}`), updates);
+                            }
+                        });
+                    }
+                    if (!window.bossBattleEnding) {
+                        window.bossBattleEnding = true;
+                        setTimeout(() => {
+                            update(ref(database, `sessions/${currentGamePin}`), { activeEvent: null });
+                            window.bossBattleEnding = false; window.bossDefeatedRewarded = false;
+                            renderHostLeaderboardContent();
+                        }, 5000);
+                    }
+                } else {
+                    bossRes.classList.add('hidden');
+                }
             }
         }
+    });
+}
 
-        if (answeredCorrectly) {
-            if (currentQ.type === "poll") {
-                scoreIncrement = 0;
-            } else if (currentQ.type === "speed-math" && answerObj.textAnswer) {
-                const length = answerObj.textAnswer.length;
-                const lengthBonus = Math.max(0, 500 - (length * 3));
-                scoreIncrement = 500 + lengthBonus;
-                const currentStreakInstance = (playersData[pKey].streak || 0) + 1;
-                if (currentStreakInstance >= 3) scoreIncrement = Math.round(scoreIncrement * 1.5);
-                updates[`players/${pKey}/streak`] = currentStreakInstance;
+function renderHostLeaderboardContent() {
+    get(ref(database, `sessions/${currentGamePin}/players`)).then(snapshot => {
+        const playersObj = snapshot.val() || {};
+        const allPlayers = Object.entries(playersObj).map(([id, p]) => ({ id, ...p })).sort((a, b) => b.score - a.score);
+        const players = allPlayers.slice(0, 5);
+        
+        const listEl = document.getElementById('leaderboard-list');
+        listEl.innerHTML = '';
+        
+        if (players.length === 0) return;
+
+        const podiumContainer = document.createElement('div');
+        podiumContainer.className = 'podium-container';
+        
+        const podiumOrder = [
+            { rank: 2, p: players[1] },
+            { rank: 1, p: players[0] },
+            { rank: 3, p: players[2] }
+        ];
+
+        podiumOrder.forEach(item => {
+            if (item.p) {
+                const initial = item.p.name.charAt(0).toUpperCase();
+                const crown = item.rank === 1 ? '<div class="podium-crown">👑</div>' : '';
+                
+                let shiftIndicator = '';
+                if (currentQuestionIndex > 0) {
+                    const prevRank = item.p.previousRank || 1;
+                    const currRank = item.rank;
+                    if (currRank < prevRank) {
+                        shiftIndicator = `<span class="rank-shift-up" style="font-size: 0.8rem; margin-left: 0.3rem;">▲</span>`;
+                    } else if (currRank > prevRank) {
+                        shiftIndicator = `<span class="rank-shift-down" style="font-size: 0.8rem; margin-left: 0.3rem;">▼</span>`;
+                    } else {
+                        shiftIndicator = `<span class="rank-shift-same" style="font-size: 0.8rem; margin-left: 0.3rem;">—</span>`;
+                    }
+                }
+                
+                let teamEmoji = '';
+                if (teamModeEnabled && item.p.team) {
+                    teamEmoji = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(item.p.team)}</span>`;
+                }
+                
+                const podiumEl = document.createElement('div');
+                podiumEl.className = `podium-place rank-${item.rank}`;
+                podiumEl.innerHTML = `
+                    ${crown}
+                    <div class="podium-avatar">${initial}</div>
+                    <div class="podium-name" style="display:flex; align-items:center; justify-content:center; gap:0.3rem;">
+                        <span class="leaderboard-player-name" title="${item.p.name}">${teamEmoji}${item.p.name}${shiftIndicator}</span>
+                        <span class="admin-gear" data-id="${item.p.id}" data-name="${item.p.name}" title="Override ${item.p.name}" style="cursor:pointer;">⚙️</span>
+                    </div>
+                    <div class="podium-score">${item.p.score}</div>
+                    <div class="podium-block">${item.rank}</div>
+                `;
+                podiumContainer.appendChild(podiumEl);
+            }
+        });
+        
+        listEl.appendChild(podiumContainer);
+
+        for (let i = 3; i < allPlayers.length; i++) {
+            const p = allPlayers[i];
+            let shiftIndicator = '';
+            if (currentQuestionIndex > 0) {
+                const prevRank = p.previousRank || 1;
+                const currRank = i + 1;
+                if (currRank < prevRank) shiftIndicator = `<span class="rank-shift-up" style="font-size: 0.8rem; margin-left: 0.3rem;">▲</span>`;
+                else if (currRank > prevRank) shiftIndicator = `<span class="rank-shift-down" style="font-size: 0.8rem; margin-left: 0.3rem;">▼</span>`;
+                else shiftIndicator = `<span class="rank-shift-same" style="font-size: 0.8rem; margin-left: 0.3rem;">—</span>`;
+            }
+            let teamEmoji = '';
+            if (teamModeEnabled && p.team) {
+                teamEmoji = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(p.team)}</span>`;
+            }
+            
+            const el = document.createElement('div');
+            el.className = 'leaderboard-row fade-in-up mt-2';
+            el.style.animationDelay = `${(i-3) * 0.1}s`;
+            el.style.borderLeft = '4px solid #475569';
+            el.innerHTML = `
+                <span class="leaderboard-player-main">
+                    <span class="leaderboard-player-name" title="${p.name}">${i + 1}. ${teamEmoji}${p.name}${shiftIndicator}</span>
+                    <span class="admin-gear" data-id="${p.id}" data-name="${p.name}" title="Override ${p.name}" style="cursor:pointer;">⚙️</span>
+                </span>
+                <span style="flex:0 0 auto;">${p.score} pts</span>`;
+            listEl.appendChild(el);
+        }
+
+        listEl.querySelectorAll('.admin-gear').forEach(gear => {
+            gear.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openAdminModal(gear.getAttribute('data-id'), gear.getAttribute('data-name'));
+            });
+        });
+
+        if (teamModeEnabled) {
+            renderTeamScores(playersObj, document.getElementById('host-team-scores'), true);
+        }
+
+        setTimeout(() => {
+            const sfxDing = document.getElementById('sfx-ding');
+            if (sfxDing) { sfxDing.currentTime = 0; sfxDing.play().catch(()=>{}); }
+            for (let i = 0; i < 30; i++) {
+                setTimeout(() => spawnFloatingEmoji('🎉'), Math.random() * 1000);
+            }
+        }, 1500);
+    });
+}
+
+function startDashboardQuestion(index, recoverySession = null) {
+    clearSabotageEffectsForNextQuestion();
+    currentQuestionIndex = index;
+    const q = questions[index];
+    const limit = q.timeLimit || q.dashboardData?.timeLimit || 30;
+    timeRemaining = recoverySession
+        ? Math.max(0, limit - Math.floor((Date.now() - (recoverySession.questionStartTime || Date.now())) / 1000))
+        : limit;
+    currentGameState = 'question';
+
+    if (!recoverySession) {
+    update(ref(database, `sessions/${currentGamePin}`), {
+        state: 'question',
+        currentQuestionIndex: index,
+        questionStartTime: Date.now(),
+        totalAnswers: 0,
+        isPaused: false,
+        resultAnswer: null,
+        answers: null
+    });
+
+    get(ref(database, `sessions/${currentGamePin}/players`)).then(snapshot => {
+        const players = snapshot.val() || {};
+        const updates = {};
+        const sortedKeys = Object.keys(players).sort((a, b) => (players[b].score || 0) - (players[a].score || 0));
+        sortedKeys.forEach((key, idx) => {
+            updates[`players/${key}/previousRank`] = idx + 1;
+            updates[`players/${key}/hasAnswered`] = false;
+            updates[`players/${key}/answeredQuestionIndex`] = -1;
+            updates[`players/${key}/lastAnswerCorrect`] = false;
+            updates[`players/${key}/lastPointsEarned`] = 0;
+        });
+        update(ref(database, `sessions/${currentGamePin}`), updates);
+    });
+
+    get(ref(database, `sessions/${currentGamePin}/queuedAttacks`)).then(async (snap) => {
+        const queued = snap.val();
+        if (queued) {
+            const updates = {};
+            Object.keys(queued).forEach(key => {
+                const atk = queued[key];
+                const newAtkRef = push(ref(database, `sessions/${currentGamePin}/attacks`));
+                updates[`attacks/${newAtkRef.key}`] = { ...atk, timestamp: Date.now() };
+            });
+            await update(ref(database, `sessions/${currentGamePin}`), updates);
+            await remove(ref(database, `sessions/${currentGamePin}/queuedAttacks`));
+        }
+    });
+    }
+
+    const countEl = document.getElementById('host-dash-round-count');
+    if (countEl) countEl.innerText = `📊 Question ${index + 1} of ${questions.length} (${currentGameMode === 'tutorial' ? 'Practice Arena' : 'Dashboard Challenge'})`;
+    document.getElementById('host-dash-question').innerText = q.text || q.dashboardData?.question || '';
+    document.getElementById('host-dash-timer').innerText = timeRemaining;
+    document.getElementById('dash-answers-count').innerText = `${recoverySession?.totalAnswers || 0} Answers`;
+    document.getElementById('btn-dash-pause').classList.remove('hidden');
+    document.getElementById('btn-dash-resume').classList.add('hidden');
+
+    if (q.dashboardData) renderHostChart(q.dashboardData);
+    switchView('view-host-dashboard');
+
+    clearInterval(hostTimerInterval);
+    hostTimerInterval = setInterval(() => {
+        timeRemaining--;
+        document.getElementById('host-dash-timer').innerText = timeRemaining;
+        if (timeRemaining <= 5 && timeRemaining > 0) {
+            document.getElementById('host-dash-timer').classList.add('timer-warning');
+            const sfxTick = document.getElementById('sfx-tick');
+            if(sfxTick) { sfxTick.currentTime = 0; sfxTick.play().catch(()=>{}); }
+        } else {
+            document.getElementById('host-dash-timer').classList.remove('timer-warning');
+        }
+        if (timeRemaining <= 0) endDashboardQuestion();
+    }, 1000);
+}
+
+async function endDashboardQuestion() {
+    if (questionConclusionInProgress || currentGameState !== 'question') return;
+    questionConclusionInProgress = true;
+    try {
+        clearInterval(hostTimerInterval);
+        currentGameState = 'results';
+        const q = questions[currentQuestionIndex];
+        await update(ref(database, `sessions/${currentGamePin}`), {
+            state: 'results',
+            resultAnswer: getCorrectAnswerText(q),
+            resultQuestionType: 'dashboard'
+        });
+        const sfxDing = document.getElementById('sfx-ding');
+        if (sfxDing) { sfxDing.currentTime = 0; sfxDing.play().catch(() => {}); }
+        showDashboardResults();
+    } finally {
+        questionConclusionInProgress = false;
+    }
+}
+
+function showDashboardResults() {
+    switchView('view-host-dash-results');
+    const currentQ = questions[currentQuestionIndex];
+    const answerReveal = document.getElementById('host-dash-correct-answer');
+    const answerText = document.getElementById('host-dash-correct-answer-text');
+    if (answerReveal && answerText) {
+        answerText.textContent = getCorrectAnswerText(currentQ);
+        answerReveal.classList.remove('hidden');
+    }
+    get(ref(database, `sessions/${currentGamePin}`)).then(snapshot => {
+        const data = snapshot.val();
+        const playersObj = data.players || {};
+        const allPlayers = Object.values(playersObj);
+        const correctCount = allPlayers.filter(p => p.lastAnswerCorrect).length;
+        const incorrectCount = allPlayers.filter(p => p.hasAnswered && !p.lastAnswerCorrect).length;
+        document.getElementById('dash-correct-count').innerText = correctCount;
+        document.getElementById('dash-incorrect-count').innerText = incorrectCount;
+
+        const q = currentQ;
+        if (q.dashboardData) {
+            if (q.dashboardData.chartType === 'kpi') {
+                document.getElementById('host-result-chart-canvas').style.display = 'none';
+                let resKpi = document.getElementById('host-result-kpi-container');
+                if (!resKpi) {
+                    resKpi = document.createElement('div');
+                    resKpi.id = 'host-result-kpi-container';
+                    resKpi.className = 'kpi-grid';
+                    document.getElementById('host-result-chart-canvas').parentNode.appendChild(resKpi);
+                }
+                resKpi.style.display = 'grid';
+                resKpi.innerHTML = '';
+                
+                const correctIdx = q.dashboardData.correctIndex;
+                q.dashboardData.labels.forEach((lbl, idx) => {
+                    const card = document.createElement('div');
+                    card.className = 'kpi-card';
+                    if (idx === correctIdx) {
+                        card.style.borderColor = '#22c55e';
+                        card.style.background = 'rgba(34, 197, 94, 0.1)';
+                    } else {
+                        card.style.opacity = '0.4';
+                    }
+                    card.innerHTML = `
+                        <div class="kpi-value">${q.dashboardData.unit}${q.dashboardData.values[idx]}${q.dashboardData.unitSuffix}</div>
+                        <div class="kpi-label">${lbl}</div>
+                    `;
+                    resKpi.appendChild(card);
+                });
             } else {
-                const durationLimit = (currentQ.timeLimit * 1000) || 20000;
-                const submittedElapsed = Number(answerObj.elapsedTime);
-                const elapsedTime = Number.isFinite(submittedElapsed)
-                    ? Math.min(durationLimit, Math.max(0, submittedElapsed))
-                    : durationLimit;
-                const scale = Math.max(0.2, 1 - (elapsedTime / durationLimit));
-                scoreIncrement = Math.round(1000 * scale);
-                const currentStreakInstance = (playersData[pKey].streak || 0) + 1;
-                if (currentStreakInstance >= 3) scoreIncrement = Math.round(scoreIncrement * 1.5);
-                updates[`players/${pKey}/streak`] = currentStreakInstance;
+                const resKpi = document.getElementById('host-result-kpi-container');
+                if (resKpi) resKpi.style.display = 'none';
+                document.getElementById('host-result-chart-canvas').style.display = 'block';
+
+                const config = deserializeToChartConfig(q.dashboardData);
+                const correctIdx = q.dashboardData.correctIndex;
+                if (config && config.data.datasets[0].backgroundColor) {
+                    const bg = [...config.data.datasets[0].backgroundColor];
+                    
+                    let origBorder = config.data.datasets[0].borderColor;
+                    const border = Array.isArray(origBorder) ? [...origBorder] : bg.map(() => origBorder || '#fff');
+                    
+                    for (let i = 0; i < bg.length; i++) {
+                        if (i !== correctIdx) { 
+                            bg[i] = bg[i].includes('0.85') ? bg[i].replace('0.85', '0.2') : bg[i].replace('0.6', '0.2'); 
+                        }
+                        else { border[i] = '#22c55e'; }
+                    }
+                    config.data.datasets[0].backgroundColor = bg;
+                    config.data.datasets[0].borderColor = border;
+                    config.data.datasets[0].borderWidth = bg.map((_, i) => i === correctIdx ? 4 : 1);
+                }
+                if (config) {
+                    config.options.plugins.title.text += ' — ✅ ' + (q.dashboardData.labels[correctIdx] || '');
+                    if (resultChartInstance) resultChartInstance.destroy();
+                    resultChartInstance = new Chart(document.getElementById('host-result-chart-canvas'), config);
+                }
             }
+        }
+    });
+}
+
+function renderHostChart(dashData) {
+    if (dashData.chartType === 'kpi') {
+        document.getElementById('host-chart-canvas').style.display = 'none';
+        const kpiContainer = document.getElementById('host-kpi-container');
+        kpiContainer.classList.remove('hidden');
+        kpiContainer.innerHTML = '';
+        
+        dashData.labels.forEach((lbl, idx) => {
+            const card = document.createElement('div');
+            card.className = 'kpi-card';
+            card.innerHTML = `
+                <div class="kpi-value">${dashData.unit}${dashData.values[idx]}${dashData.unitSuffix}</div>
+                <div class="kpi-label">${lbl}</div>
+            `;
+            kpiContainer.appendChild(card);
+        });
+    } else {
+        document.getElementById('host-chart-canvas').style.display = 'block';
+        document.getElementById('host-kpi-container').classList.add('hidden');
+        const config = deserializeToChartConfig(dashData);
+        if (hostChartInstance) hostChartInstance.destroy();
+        hostChartInstance = new Chart(document.getElementById('host-chart-canvas'), config);
+    }
+}
+
+function renderPlayerChart(dashData, questionStartTime, timeLimit) {
+    const handleAnswer = async (clickedIndex) => {
+        if (!currentGamePin || hasAnsweredThisRound || currentGameState !== 'question') return;
+        const isCorrect = clickedIndex === dashData.correctIndex;
+        hasAnsweredThisRound = true;
+
+        document.getElementById('player-dash-locked').classList.remove('hidden');
+        clearInterval(playerDashTimerInterval);
+
+        const sessionRef = ref(database, `sessions/${currentGamePin}`);
+        const snap = await get(sessionRef);
+        const d = snap.val();
+        if (!d || !d.players || !d.players[myPlayerId]) return;
+        if (d.state !== 'question' || d.currentQuestionIndex !== currentQuestionIndex) {
+            hasAnsweredThisRound = false;
+            return showToast("That question has already closed.");
+        }
+        const pData = d.players[myPlayerId];
+        if (pData.answeredQuestionIndex === currentQuestionIndex) return;
+
+        const timeElapsed = (Date.now() - questionStartTime) / 1000;
+        const q = questions[currentQuestionIndex];
+        
+        let points = 0;
+        let newStreak = pData.streak || 0;
+        let isStreakMultiplierActive = false;
+        
+        let receiptBase = 0;
+        let receiptSpeed = 0;
+        let receiptStreak = 0;
+        let receiptDouble = q?.isDoublePoints || false;
+
+        if (isCorrect) {
+            receiptBase = 500;
+            receiptSpeed = Math.floor(Math.max(0, 500 * (1 - (timeElapsed / timeLimit))));
+            
+            newStreak += 1;
+            if (newStreak >= 3) {
+                receiptStreak = Math.floor((receiptBase + receiptSpeed) * 0.2);
+                isStreakMultiplierActive = true;
+            }
+            
+            points = receiptBase + receiptSpeed + receiptStreak;
+            if (receiptDouble) points *= 2;
+            if (pData.speedBoostActive) points = Math.floor(points * 1.5);
         } else {
-            updates[`players/${pKey}/streak`] = 0;
+            newStreak = 0;
         }
 
-        updates[`players/${pKey}/score`] = (playersData[pKey].score || 0) + scoreIncrement;
-        updates[`players/${pKey}/lastPointsEarned`] = scoreIncrement;
-        updates[`players/${pKey}/wasCorrect`] = answeredCorrectly;
+        const awardedInventory = awardRandomPowerupIfDeserving(isCorrect, newStreak, timeElapsed, pData.inventory || []);
 
-        if (answerObj) {
-            sessionTotalAnswersCount++;
-            if (answeredCorrectly) {
-                sessionTotalCorrectAnswersCount++;
+        const playerUpdates = {};
+        playerUpdates[`players/${myPlayerId}/hasAnswered`] = true;
+        playerUpdates[`players/${myPlayerId}/answeredQuestionIndex`] = currentQuestionIndex;
+        playerUpdates[`players/${myPlayerId}/lastAnswerCorrect`] = isCorrect;
+        playerUpdates[`players/${myPlayerId}/lastPointsEarned`] = points;
+        playerUpdates[`players/${myPlayerId}/score`] = pData.score + points;
+        playerUpdates[`players/${myPlayerId}/streak`] = newStreak;
+        playerUpdates[`players/${myPlayerId}/isStreakMultiplierActive`] = isStreakMultiplierActive;
+        playerUpdates[`players/${myPlayerId}/inventory`] = awardedInventory;
+        if (pData.speedBoostActive) playerUpdates[`players/${myPlayerId}/speedBoostActive`] = false;
+        
+        playerUpdates[`players/${myPlayerId}/receiptBase`] = receiptBase;
+        playerUpdates[`players/${myPlayerId}/receiptSpeed`] = receiptSpeed;
+        playerUpdates[`players/${myPlayerId}/receiptStreak`] = receiptStreak;
+        playerUpdates[`players/${myPlayerId}/receiptDouble`] = receiptDouble;
+
+        playerUpdates[`answersCount/${clickedIndex}`] = increment(1);
+        playerUpdates[`totalAnswers`] = increment(1);
+        playerUpdates[`answers/${myPlayerId}`] = { questionIndex: currentQuestionIndex, optionIndex: clickedIndex, elapsedTime: Math.round(timeElapsed * 1000) };
+
+        await update(sessionRef, playerUpdates);
+    };
+
+    if (dashData.chartType === 'kpi') {
+        document.getElementById('player-chart-canvas').style.display = 'none';
+        const kpiContainer = document.getElementById('player-kpi-container');
+        kpiContainer.classList.remove('hidden');
+        kpiContainer.innerHTML = '';
+        
+        dashData.labels.forEach((lbl, idx) => {
+            const card = document.createElement('div');
+            card.className = 'kpi-card';
+            card.innerHTML = `
+                <div class="kpi-value">${dashData.unit}${dashData.values[idx]}${dashData.unitSuffix}</div>
+                <div class="kpi-label">${lbl}</div>
+            `;
+            card.onclick = () => handleAnswer(idx);
+            kpiContainer.appendChild(card);
+        });
+    } else {
+        document.getElementById('player-chart-canvas').style.display = 'block';
+        document.getElementById('player-kpi-container').classList.add('hidden');
+        
+        const config = deserializeToChartConfig(dashData);
+        if (!config) return;
+        
+        if (config.type === 'line' && config.data.datasets[0]) {
+            config.data.datasets[0].pointRadius = 12;
+            config.data.datasets[0].pointHoverRadius = 16;
+        }
+        
+        config.options.onClick = async (event, elements) => {
+            if (!elements || elements.length === 0) return;
+            handleAnswer(elements[0].index !== undefined ? elements[0].index : elements[0].datasetIndex);
+        };
+        
+        if (playerChartInstance) playerChartInstance.destroy();
+        playerChartInstance = new Chart(document.getElementById('player-chart-canvas'), config);
+    }
+}
+
+async function reassignTeams() {
+    if (!currentGamePin) return;
+    const snap = await get(ref(database, `sessions/${currentGamePin}`));
+    const data = snap.val();
+    if (!data || !data.players) return;
+
+    const tc = data.teamCount || teamCount || 4;
+    const playerKeys = Object.keys(data.players);
+    const updates = {};
+    playerKeys.forEach((key, idx) => {
+        updates[`players/${key}/team`] = TEAM_COLORS[idx % tc].key;
+    });
+    await update(ref(database, `sessions/${currentGamePin}`), updates);
+}
+
+function renderTeamScores(playersObj, containerEl, isHost) {
+    if (!containerEl) return;
+    containerEl.innerHTML = '';
+
+    const players = Object.values(playersObj);
+    const teamMap = {};
+    players.forEach(p => {
+        if (!p.team) return;
+        if (!teamMap[p.team]) teamMap[p.team] = { score: 0, count: 0 };
+        teamMap[p.team].score += (p.score || 0);
+        teamMap[p.team].count++;
+    });
+
+    const sorted = Object.entries(teamMap).sort((a, b) => b[1].score - a[1].score);
+    if (sorted.length === 0) { containerEl.classList.add('hidden'); return; }
+    containerEl.classList.remove('hidden');
+
+    sorted.forEach(([teamKey, data], idx) => {
+        const tc = TEAM_COLORS.find(t => t.key === teamKey);
+        if (!tc) return;
+
+        if (isHost) {
+            const card = document.createElement('div');
+            card.className = `team-score-card ${idx === 0 ? 'rank-1' : ''}`;
+            card.style.borderColor = tc.color;
+            card.innerHTML = `<div class="team-name" style="color:${tc.color}">${tc.emoji} ${getTeamLabel(teamKey)}</div><div class="team-total">${data.score}</div><div class="team-members">${data.count} player${data.count !== 1 ? 's' : ''}</div>`;
+            containerEl.appendChild(card);
+        } else {
+            const chip = document.createElement('div');
+            chip.className = 'team-score-chip';
+            chip.style.borderColor = tc.color;
+            chip.innerHTML = `<span>${tc.emoji}</span> <span style="color:${tc.color}">${data.score}</span>`;
+            containerEl.appendChild(chip);
+        }
+    });
+}
+
+function renderPlayerTeamPicker(data, playerData) {
+    if (!data || !playerData) return;
+    const badge = document.getElementById('player-team-badge');
+    const pickerEl = document.getElementById('player-team-picker');
+    const buttonsEl = document.getElementById('team-picker-buttons');
+    
+    if (data.teamMode && playerData.team && data.teamAssign === 'auto') {
+        const tc = TEAM_COLORS.find(t => t.key === playerData.team);
+        if (tc && badge) {
+            badge.innerText = formatTeamLabel(playerData.team, data.teamLabelMode);
+            badge.className = `team-badge mt-3 team-${tc.key}`;
+            badge.classList.remove('hidden');
+        }
+        if (pickerEl) pickerEl.classList.add('hidden');
+    } else if (data.teamMode && data.teamAssign === 'pick') {
+        if (badge) badge.classList.add('hidden');
+        if (pickerEl) pickerEl.classList.remove('hidden');
+        if (buttonsEl) buttonsEl.innerHTML = '';
+        
+        const tc = data.teamCount || 4;
+        for (let i = 0; i < tc; i++) {
+            const t = TEAM_COLORS[i];
+            const btn = document.createElement('button');
+            btn.className = 'team-pick-btn';
+            
+            if (playerData.team === t.key) {
+                btn.classList.add('selected');
+                btn.style.borderColor = t.color;
+                btn.style.background = t.color + '22';
+                if (badge) {
+                    badge.innerText = formatTeamLabel(t.key, data.teamLabelMode);
+                    badge.className = `team-badge mt-3 team-${t.key}`;
+                    badge.classList.remove('hidden');
+                }
+            } else {
+                btn.style.borderColor = t.color + '66';
+            }
+            
+            btn.innerHTML = `<span class="team-pick-emoji">${t.emoji}</span><span>${getTeamLabel(t.key, data.teamLabelMode)}</span>`;
+            btn.addEventListener('click', async () => {
+                await update(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`), { team: t.key });
+            });
+            if (buttonsEl) buttonsEl.appendChild(btn);
+        }
+    } else {
+        if (badge) badge.classList.add('hidden');
+        if (pickerEl) pickerEl.classList.add('hidden');
+    }
+}
+
+function spawnSmackTalk(text, playerName) {
+    const container = document.getElementById('host-chat-container');
+    if (!container) return;
+    const msg = document.createElement('div');
+    msg.className = 'smack-talk-msg';
+    msg.innerText = `${playerName}: ${text}`;
+    msg.style.top = Math.floor(Math.random() * 80) + '%';
+    const dur = 6 + Math.random() * 4;
+    msg.style.animation = `scroll-left ${dur}s linear forwards`;
+    container.appendChild(msg);
+    setTimeout(() => { if(msg.parentNode) msg.parentNode.removeChild(msg); }, dur * 1000 + 500);
+}
+
+function spawnFloatingEmoji(emojiChar) {
+    const lobbyContainer = document.getElementById('host-lobby-emoji-container');
+    const lbContainer = document.getElementById('host-emoji-container');
+    const hostLobbyView = document.getElementById('view-host-lobby');
+    const container = (hostLobbyView && hostLobbyView.classList.contains('active')) ? lobbyContainer : lbContainer;
+
+    if (!container) return;
+
+    while (container.children.length >= MAX_FLOATING_EMOJIS) {
+        container.removeChild(container.firstChild);
+    }
+
+    const el = document.createElement('div');
+    el.className = 'floating-emoji';
+    el.innerText = emojiChar;
+    el.style.left = Math.random() * 80 + 10 + '%';
+    const dur = Math.random() * 2 + 2;
+    el.style.animationDuration = dur + 's';
+    
+    container.appendChild(el);
+    el.addEventListener('animationend', () => {
+        if (container.contains(el)) container.removeChild(el);
+    });
+}
+
+let sandboxActive = false;
+function setSandboxStatus(msg) {
+    const el = document.getElementById('sandbox-status');
+    if (el) {
+        el.innerText = msg;
+        setTimeout(() => { el.innerText = ''; }, 4000);
+    }
+}
+
+function showToast(msg, color = '#ef4444') {
+    const t = document.createElement('div');
+    t.style.cssText = `position:fixed;top:20px;left:50%;transform:translateX(-50%);background:${color};color:#fff;padding:0.75rem 1.5rem;border-radius:12px;z-index:99999;font-weight:600;pointer-events:none;font-size:0.95rem;box-shadow:0 8px 24px rgba(0,0,0,0.4);animation:fadeInUp 0.3s ease`;
+    t.innerText = msg;
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.4s'; setTimeout(() => t.remove(), 400); }, 3000);
+}
+
+function toggleSandbox() {
+    if (!currentGamePin) {
+        showToast('Start a game session first, then open Presenter Sandbox from the lobby!', '#b45309');
+        return;
+    }
+    sandboxActive = !sandboxActive;
+    if (!IS_SIMULATOR_CLIENT) sessionStorage.removeItem('dashboard_wars_player_session');
+    const panel = document.getElementById('sandbox-simulator-panel');
+    const iframe = document.getElementById('sandbox-iframe');
+    if (sandboxActive) {
+        panel.classList.remove('hidden');
+        panel.classList.remove('minimized');
+        panel.style.bottom = '20px';
+        panel.style.right = '20px';
+        panel.style.top = 'auto';
+        panel.style.left = 'auto';
+        const simUrl = `${window.location.origin}${window.location.pathname}?pin=${currentGamePin}&nickname=DemoPlayer&sim=1`;
+        iframe.src = simUrl;
+        setSandboxStatus('Simulator loading...');
+    } else {
+        panel.classList.add('hidden');
+        iframe.src = 'about:blank';
+    }
+}
+
+function closeSandbox() {
+    sandboxActive = false;
+    const panel = document.getElementById('sandbox-simulator-panel');
+    panel.classList.add('hidden');
+    panel.classList.remove('minimized');
+    document.getElementById('sandbox-iframe').src = 'about:blank';
+}
+
+// ==========================================
+// CENTRAL NAV & ELEMENT EVENT ATTACHMENTS
+// ==========================================
+function initApp() {
+    initLandingParticles();
+    applyBranding(currentBranding);
+    loadBranding();
+    applyTheme(localStorage.getItem('dashboard_wars_theme') || 'ey');
+    loadTheme();
+
+    // Landing Screen Listeners
+    document.getElementById('btn-goto-join')?.addEventListener('click', () => switchView('view-player-join'));
+    document.getElementById('btn-goto-login')?.addEventListener('click', () => {
+        if (getCurrentUser()) switchView('view-host-setup');
+        else switchView('view-admin-login');
+    });
+    document.getElementById('btn-back-landing-host')?.addEventListener('click', () => switchView('view-landing'));
+    document.getElementById('btn-back-landing-player')?.addEventListener('click', () => switchView('view-landing'));
+    document.getElementById('btn-back-landing-login')?.addEventListener('click', () => switchView('view-landing'));
+
+    document.getElementById('btn-save-branding')?.addEventListener('click', async () => {
+        const nextBranding = normalizeBranding({
+            eventBadge: document.getElementById('branding-event-badge')?.value,
+            titleLine1: document.getElementById('branding-title-line-1')?.value,
+            titleLine2: document.getElementById('branding-title-line-2')?.value,
+            subtitle: document.getElementById('branding-subtitle')?.value,
+            supportingText: document.getElementById('branding-supporting-text')?.value,
+            joinLabel: document.getElementById('branding-join-label')?.value,
+            hostLabel: document.getElementById('branding-host-label')?.value
+        });
+        applyBranding(nextBranding);
+        applyTheme(document.getElementById('branding-theme')?.value || 'ey');
+        localStorage.setItem('dashboard_wars_branding', JSON.stringify(nextBranding));
+        localStorage.setItem('dashboard_wars_theme', currentTheme);
+        if (isFirebaseEnabled) {
+            await Promise.all([
+                set(ref(database, 'settings/dashboardWarsBranding'), { ...nextBranding, updatedAt: Date.now() }),
+                set(ref(database, 'settings/dashboardWarsTheme'), currentTheme)
+            ]);
+        }
+        showToast('Home screen branding saved.', '#166534');
+    });
+
+    document.getElementById('btn-reset-branding')?.addEventListener('click', async () => {
+        if (!confirm('Reset the home screen wording to the original defaults?')) return;
+        applyBranding(DEFAULT_BRANDING);
+        applyTheme('ey');
+        localStorage.setItem('dashboard_wars_branding', JSON.stringify(DEFAULT_BRANDING));
+        localStorage.setItem('dashboard_wars_theme', 'ey');
+        if (isFirebaseEnabled) {
+            await Promise.all([
+                set(ref(database, 'settings/dashboardWarsBranding'), { ...DEFAULT_BRANDING, updatedAt: Date.now() }),
+                set(ref(database, 'settings/dashboardWarsTheme'), 'ey')
+            ]);
+        }
+        showToast('Home screen branding reset.', '#2563eb');
+    });
+    document.getElementById('branding-theme')?.addEventListener('change', event => {
+        applyTheme(event.target.value);
+    });
+
+    // Admin Logout explicitly wired to Firebase SignOut
+    document.getElementById('btn-admin-logout')?.addEventListener('click', async () => {
+        if (confirm("Are you sure you want to sign out?")) {
+            await signOut(auth);
+            window.location.reload(); // Refreshes the page to clear the session safely
+        }
+    });
+
+    // Firebase Error Dismissal
+    document.getElementById('btn-dismiss-firebase')?.addEventListener('click', () => {
+        document.getElementById('firebase-warning-modal').classList.add('hidden');
+    });
+
+    // Admin Login Workflow
+    document.getElementById('form-admin-login')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!isFirebaseEnabled) return alert("Firebase is not connected.");
+        const password = document.getElementById('input-admin-password').value.trim();
+        if (password !== 'eypowerbi2026') return alert("Incorrect Master Password.");
+        const dummyEmail = 'admin@eypowerbi.com';
+        try {
+            await signInWithEmailAndPassword(auth, dummyEmail, password);
+            switchView('view-host-setup');
+        } catch (err) {
+            try {
+                await createUserWithEmailAndPassword(auth, dummyEmail, password);
+                switchView('view-host-setup');
+            } catch (regErr) {
+                alert("System Error: " + regErr.message);
             }
         }
     });
 
-    await update(gameSessionRef, updates);
-}
+    // Content Generators
+    document.getElementById('btn-import-presets')?.addEventListener('click', async () => {
+        const user = getCurrentUser();
+        if (!user) return alert("Not logged in.");
+        if (!confirm("Import the Power BI, VBA, and Microsoft Copilot question packs?")) return;
+        document.getElementById('btn-import-presets').innerText = "Importing...";
+        const packs = [
+            ...eyPresets.map(module => ({
+                ...module,
+                subject: 'powerbi',
+                questions: module.questions.map(question => ({ ...question, subject: 'powerbi', type: question.type || 'multiple-choice' }))
+            })),
+            ...vbaCopilotPresets
+        ];
+        for (let module of packs) {
+            const newQuizRef = push(ref(database, `users/${user.uid}/quizzes`));
+            await set(newQuizRef, { title: module.title, subject: module.subject, questions: module.questions, createdAt: Date.now() });
+        }
+        alert("Power BI, VBA, and Copilot packs imported successfully.");
+        document.getElementById('btn-import-presets').innerText = "Import Power BI, VBA & Copilot Packs";
+    });
 
-async function presentHostLeaderboardView() {
-    if (!isFirebaseEnabled) {
-        switchView("hostLeaderboard");
-        return;
+    document.getElementById('btn-open-maker')?.addEventListener('click', () => {
+        currentEditingQuizId = null;
+        makerQuestions = [defaultMakerQuestion()];
+        document.getElementById('maker-quiz-title').value = '';
+        renderMakerQuestions();
+        switchView('view-admin-maker');
+    });
+    document.getElementById('btn-close-maker')?.addEventListener('click', () => switchView('view-host-setup'));
+    document.getElementById('btn-add-maker-question')?.addEventListener('click', () => {
+        makerQuestions.push(defaultMakerQuestion());
+        renderMakerQuestions();
+    });
+
+    document.getElementById('btn-save-quiz')?.addEventListener('click', async () => {
+        const title = document.getElementById('maker-quiz-title').value.trim();
+        if (!title) return alert('Please enter a quiz title.');
+        if (makerQuestions.length === 0) return alert('Please add at least one question.');
+        for (let q of makerQuestions) {
+            if (!q.text) return alert('All questions must have text.');
+            q.subject = q.subject || 'powerbi';
+            const type = normalizeQuestionType(q);
+            if (['multiple-choice', 'true-false', 'poll', 'dashboard'].includes(type) && (!q.options?.length || q.options.some(opt => !opt))) {
+                return alert('All visible options must be filled.');
+            }
+            if (type === 'jumbled-prompt' && (!q.words || q.words.length < 2)) return alert('Arrange-in-order questions need at least two pieces.');
+            if (type === 'type-answer' && !q.answerText) return alert('Exact-answer questions need an answer.');
+            if (type === 'speed-math' && !q.equation) return alert('Missing-elements questions need required elements.');
+        }
+        const subjects = [...new Set(makerQuestions.map(q => q.subject))];
+        const subject = subjects.length === 1 ? subjects[0] : 'mixed';
+        const user = getCurrentUser();
+        if (!user) return alert('Not logged in. Cannot save.');
+        if (currentEditingQuizId) {
+            await update(ref(database, `users/${user.uid}/quizzes/${currentEditingQuizId}`), { title, subject, questions: makerQuestions, updatedAt: Date.now() });
+            alert('Quiz Updated!');
+        } else {
+            const newQuizRef = push(ref(database, `users/${user.uid}/quizzes`));
+            await set(newQuizRef, { title, subject, questions: makerQuestions, createdAt: Date.now() });
+            alert('New Quiz Saved!');
+        }
+        switchView('view-host-setup');
+    });
+
+    document.getElementById('btn-close-preview')?.addEventListener('click', () => {
+        document.getElementById('modal-chart-preview').classList.add('hidden');
+        if (previewChartInstance) previewChartInstance.destroy();
+    });
+    document.getElementById('btn-close-preview-ok')?.addEventListener('click', () => {
+        document.getElementById('modal-chart-preview').classList.add('hidden');
+        if (previewChartInstance) previewChartInstance.destroy();
+    });
+
+    // Engine Launcher Buttons
+    document.getElementById('btn-dashboard-challenge')?.addEventListener('click', () => {
+        currentGameMode = 'dashboard';
+        const roundCount = parseInt(document.getElementById('dash-round-count')?.value || 5);
+        const difficulty = document.getElementById('dash-difficulty')?.value || 'normal';
+        dashboardRounds = generateDashboardGame(roundCount, difficulty);
+        questions = dashboardRounds.map(r => ({ text: r.question, correctIndex: r.correctIndex, timeLimit: r.timeLimit, dashboardData: serializeRound(r) }));
+        currentHostedQuizTitle = 'Dashboard Challenge';
+        setupGameLobby();
+    });
+
+    document.getElementById('btn-tutorial-mode')?.addEventListener('click', () => {
+        currentGameMode = 'tutorial';
+        questions = getTutorialRounds(); 
+        currentHostedQuizTitle = 'Practice Arena (Tutorial)';
+        setupGameLobby();
+    });
+
+    // General Session Interactors
+    document.getElementById('btn-cancel-session')?.addEventListener('click', () => {
+        if (confirm("Cancel this session and return to dashboard?")) {
+            remove(ref(database, `sessions/${currentGamePin}`));
+            currentGamePin = null;
+            switchView('view-host-setup');
+        }
+    });
+    document.getElementById('btn-start-game')?.addEventListener('click', () => {
+        if (questions[0].dashboardData) startDashboardQuestion(0);
+        else startQuestion(0);
+    });
+    document.getElementById('btn-skip-question')?.addEventListener('click', () => endQuestion());
+    document.getElementById('btn-pause-timer')?.addEventListener('click', () => {
+        clearInterval(hostTimerInterval);
+        hostPausedAt = Date.now();
+        document.getElementById('btn-pause-timer').classList.add('hidden');
+        document.getElementById('btn-resume-timer').classList.remove('hidden');
+        update(ref(database, `sessions/${currentGamePin}`), { isPaused: true, pausedAt: hostPausedAt });
+    });
+    document.getElementById('btn-resume-timer')?.addEventListener('click', async () => {
+        document.getElementById('btn-resume-timer').classList.add('hidden');
+        document.getElementById('btn-pause-timer').classList.remove('hidden');
+        // Adjust questionStartTime to account for pause duration
+        const snap = await get(ref(database, `sessions/${currentGamePin}`));
+        const d = snap.val();
+        const pauseDuration = Date.now() - (d.pausedAt || hostPausedAt || Date.now());
+        const newStartTime = (d.questionStartTime || 0) + pauseDuration;
+        await update(ref(database, `sessions/${currentGamePin}`), { isPaused: false, questionStartTime: newStartTime, pausedAt: null });
+        hostTimerInterval = setInterval(() => {
+            timeRemaining--;
+            document.getElementById('host-timer').innerText = timeRemaining;
+            if (timeRemaining <= 5) document.getElementById('host-timer').classList.add('timer-warning');
+            else document.getElementById('host-timer').classList.remove('timer-warning');
+            if (timeRemaining <= 0) endQuestion();
+        }, 1000);
+    });
+
+    document.getElementById('btn-next-leaderboard')?.addEventListener('click', () => {
+        update(ref(database, `sessions/${currentGamePin}`), { state: 'leaderboard' });
+        showHostLeaderboard();
+    });
+
+    function executeGameOverSequence() {
+        clearInterval(hostTimerInterval);
+        currentGameState = 'game_over';
+        update(ref(database, `sessions/${currentGamePin}`), { state: 'game_over' });
+        document.getElementById('btn-next-question').innerText = "Game Ended";
+        document.getElementById('btn-next-question').disabled = true;
+        document.getElementById('btn-back-dashboard').classList.remove('hidden');
+
+        get(ref(database, `sessions/${currentGamePin}/players`)).then(snapshot => {
+            const playersObj = snapshot.val() || {};
+            const players = Object.values(playersObj).sort((a, b) => (b.score || 0) - (a.score || 0));
+            const user = getCurrentUser();
+            if (user) {
+                push(ref(database, `users/${user.uid}/history`), {
+                    date: Date.now(),
+                    quizName: currentHostedQuizTitle,
+                    playerCount: players.length,
+                    topScores: players
+                });
+            }
+        });
+        showHostLeaderboard();
     }
-    const playersSnapshot = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players`));
-    const listUI = document.getElementById("leaderboard-list");
-    listUI.innerHTML = "";
 
-    if (playersSnapshot.exists()) {
-        const array = Object.entries(playersSnapshot.val()).map(([key, val]) => ({ key, ...val }));
-        array.sort((a, b) => b.score - a.score);
+    document.getElementById('btn-end-game-early')?.addEventListener('click', () => {
+        if (confirm("Are you sure you want to end the game early and skip all remaining questions?")) {
+            executeGameOverSequence();
+        }
+    });
+
+    document.getElementById('btn-dash-end-game-early')?.addEventListener('click', () => {
+        if (confirm("Are you sure you want to end the game early and skip all remaining questions?")) {
+            executeGameOverSequence();
+        }
+    });
+
+    document.getElementById('btn-next-question')?.addEventListener('click', async () => {
+        if (currentQuestionIndex + 1 < questions.length) {
+            const sessSnap = await get(ref(database, `sessions/${currentGamePin}/nextDoublePoints`));
+            if (sessSnap.val() === true) {
+                questions[currentQuestionIndex + 1].isDoublePoints = true;
+                await update(ref(database, `sessions/${currentGamePin}`), { nextDoublePoints: false, hype: 0 });
+            }
+            if (questions[currentQuestionIndex + 1].dashboardData) startDashboardQuestion(currentQuestionIndex + 1);
+            else startQuestion(currentQuestionIndex + 1);
+        } else {
+            executeGameOverSequence();
+        }
+    });
+
+    document.getElementById('btn-back-dashboard')?.addEventListener('click', () => {
+        if (currentGamePin) remove(ref(database, `sessions/${currentGamePin}`));
+        currentGamePin = null;
+        document.getElementById('btn-next-question').innerText = "Next Question";
+        document.getElementById('btn-next-question').disabled = false;
+        document.getElementById('btn-back-dashboard').classList.add('hidden');
+        switchView('view-host-setup');
+    });
+
+    document.getElementById('btn-download-csv')?.addEventListener('click', async () => {
+        const snap = await get(ref(database, `sessions/${currentGamePin}/players`));
+        const playersObj = snap.val() || {};
+        const players = Object.values(playersObj).sort((a, b) => b.score - a.score);
+        const teamMap = {};
+        players.forEach(p => {
+            if (!p.team) return;
+            if (!teamMap[p.team]) teamMap[p.team] = 0;
+            teamMap[p.team] += (p.score || 0);
+        });
+        let csv = "Rank,Nickname,Score,Team,Team Score\n";
+        players.forEach((p, idx) => {
+            const teamObj = p.team ? TEAM_COLORS.find(t => t.key === p.team) : null;
+            const teamName = teamObj ? getTeamLabel(p.team) : "None";
+            const teamPoints = p.team ? (teamMap[p.team] || 0) : "";
+            csv += `${idx + 1},${p.name},${p.score},${teamName},${teamPoints}\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.setAttribute('href', url);
+        a.setAttribute('download', `powerquiz_results_${currentGamePin}.csv`);
+        a.click();
+    });
+
+    document.getElementById('btn-dash-skip')?.addEventListener('click', () => endDashboardQuestion());
+    document.getElementById('btn-dash-next-leaderboard')?.addEventListener('click', () => {
+        update(ref(database, `sessions/${currentGamePin}`), { state: 'leaderboard' });
+        showHostLeaderboard();
+    });
+    document.getElementById('btn-dash-pause')?.addEventListener('click', () => {
+        clearInterval(hostTimerInterval);
+        hostPausedAt = Date.now();
+        document.getElementById('btn-dash-pause').classList.add('hidden');
+        document.getElementById('btn-dash-resume').classList.remove('hidden');
+        update(ref(database, `sessions/${currentGamePin}`), { isPaused: true, pausedAt: hostPausedAt });
+    });
+    document.getElementById('btn-dash-resume')?.addEventListener('click', async () => {
+        document.getElementById('btn-dash-resume').classList.add('hidden');
+        document.getElementById('btn-dash-pause').classList.remove('hidden');
+        const snap = await get(ref(database, `sessions/${currentGamePin}`));
+        const d = snap.val();
+        const pauseDuration = Date.now() - (d.pausedAt || hostPausedAt || Date.now());
+        const newStartTime = (d.questionStartTime || 0) + pauseDuration;
+        await update(ref(database, `sessions/${currentGamePin}`), { isPaused: false, questionStartTime: newStartTime, pausedAt: null });
+        hostTimerInterval = setInterval(() => {
+            timeRemaining--;
+            document.getElementById('host-dash-timer').innerText = timeRemaining;
+            if (timeRemaining <= 5) document.getElementById('host-dash-timer').classList.add('timer-warning');
+            else document.getElementById('host-dash-timer').classList.remove('timer-warning');
+            if (timeRemaining <= 0) endDashboardQuestion();
+        }, 1000);
+    });
+
+    // Player Join Logic
+    document.getElementById('form-join')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!isFirebaseEnabled) return alert("Firebase is not connected.");
+
+        const pin = document.getElementById('input-pin').value.trim();
+        const name = document.getElementById('input-nickname').value.trim();
         
-        const podiumDisplay = document.getElementById("podium-display");
-        if (podiumDisplay) {
-            podiumDisplay.classList.remove("hidden");
-            const p1 = document.querySelector(".podium-1");
-            const p2 = document.querySelector(".podium-2");
-            const p3 = document.querySelector(".podium-3");
-            
-            if(array[0]) { 
-                document.getElementById("podium-p1-name").innerText = array[0].nickname; 
-                document.getElementById("podium-p1-score").innerText = array[0].score + " pts"; 
-                if (p1) p1.style.display = "flex";
-            } else { if (p1) p1.style.display = "none"; }
-            
-            if(array[1]) { 
-                document.getElementById("podium-p2-name").innerText = array[1].nickname; 
-                document.getElementById("podium-p2-score").innerText = array[1].score + " pts"; 
-                if (p2) p2.style.display = "flex"; 
-            } else { if (p2) p2.style.display = "none"; }
-            
-            if(array[2]) { 
-                document.getElementById("podium-p3-name").innerText = array[2].nickname; 
-                document.getElementById("podium-p3-score").innerText = array[2].score + " pts"; 
-                if (p3) p3.style.display = "flex"; 
-            } else { if (p3) p3.style.display = "none"; }
+        if (!pin || !name) return;
+        if (name.length < 2) return alert("Please enter a nickname with at least 2 characters.");
+        if (/^\d+$/.test(name)) return alert("Nickname cannot be only numbers.");
+        if (!/[a-zA-Z]/.test(name)) return alert("Nickname must contain at least one letter.");
+        if (!IS_SIMULATOR_CLIENT) {
+            localStorage.setItem('dashboard_wars_last_join', JSON.stringify({ pin, nickname: name }));
         }
 
-        array.slice(3, 10).forEach((player, idx) => {
-            const row = document.createElement("div");
-            row.className = "leaderboard-row fade-in-up";
-            const name = document.createElement("span");
-            const score = document.createElement("span");
-            name.textContent = `#${idx + 4} ${player.nickname}`;
-            score.textContent = `${player.score} pts`;
-            row.append(name, score);
-            listUI.appendChild(row);
+        const submitBtn = document.getElementById('btn-join-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.innerText = "⏳ Entering..."; }
+
+        try {
+            const sessionSnap = await get(ref(database, `sessions/${pin}`));
+            if (!sessionSnap.exists()) {
+                alert("Game PIN not found.");
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerText = "🚀 Enter Arena"; }
+                return;
+            }
+            
+            const data = sessionSnap.val();
+            const deviceId = getPlayerDeviceId();
+            
+            const playersEntries = Object.entries(data.players || {});
+            const existingPlayer = playersEntries.find(([id, p]) => p.name.toLowerCase() === name.toLowerCase());
+
+            if (existingPlayer) {
+                if (existingPlayer[1].deviceId && existingPlayer[1].deviceId !== deviceId) {
+                    alert("That nickname is already being used on another device.");
+                    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerText = "🚀 Enter Arena"; }
+                    return;
+                }
+                myPlayerId = existingPlayer[0];
+                myNickname = existingPlayer[1].name;
+                showToast(`Reconnected as ${myNickname}!`);
+            } else {
+                if (data.state !== 'lobby') {
+                    alert("Game has already started! You cannot join as a new player.");
+                    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerText = "🚀 Enter Arena"; }
+                    return;
+                }
+                
+                myPlayerId = generateId();
+                myNickname = name;
+                
+                const playerData = { name: myNickname, deviceId, online: true, score: 0, hasAnswered: false, lastAnswerCorrect: false, lastPointsEarned: 0, streak: 0 };
+                if (data.teamMode && data.teamAssign !== 'pick') {
+                    const existingCount = playersEntries.length;
+                    const tc = data.teamCount || 4;
+                    playerData.team = TEAM_COLORS[existingCount % tc].key;
+                }
+                
+                await set(ref(database, `sessions/${pin}/players/${myPlayerId}`), playerData);
+            }
+
+            currentGamePin = pin;
+            questions = data.questions;
+            currentGameMode = data.mode || 'classic';
+            await update(ref(database, `sessions/${pin}/players/${myPlayerId}`), { deviceId, online: true, lastSeen: Date.now() });
+            savePlayerSession();
+            setupPlayerPresence(pin, myPlayerId);
+
+            document.getElementById('display-player-name').innerText = myNickname;
+            document.getElementById('input-pin').value = pin;
+            document.getElementById('input-nickname').value = myNickname;
+            document.getElementById('player-floating-pin-text').innerText = pin;
+            document.getElementById('player-floating-pin').classList.remove('hidden');
+            document.getElementById('btn-player-sync-view')?.classList.remove('hidden');
+            if (data.state === 'lobby') {
+                renderPlayerTeamPicker(data, data.players?.[myPlayerId] || {});
+                switchView('view-player-lobby');
+            }
+
+            onChildAdded(ref(database, `sessions/${pin}/attacks`), async (snapshot) => {
+                const attack = snapshot.val();
+                if (processedAttackIds.has(snapshot.key)) return;
+                if (attack && attack.targetId === myPlayerId && !attack.blocked && (Date.now() - attack.timestamp < 10000)) {
+                    processedAttackIds.add(snapshot.key);
+                    const mySnap = await get(ref(database, `sessions/${pin}/players/${myPlayerId}`));
+                    const myData = mySnap.val();
+                    const sCount = myData ? (myData.shieldCount || (myData.shieldActive ? 1 : 0)) : 0;
+                    if (sCount > 0) {
+                        const newCount = sCount - 1;
+                        await update(ref(database, `sessions/${pin}/players/${myPlayerId}`), { shieldCount: newCount, shieldActive: newCount > 0 });
+                        await update(ref(database, `sessions/${pin}/attacks/${snapshot.key}`), { blocked: true });
+                        showShieldBlockEffect();
+                    } else {
+                        applySabotageEffect(attack.type, attack.attackerName, attack.attackerTeam, attack.attackerId);
+                    }
+                }
+            });
+        } catch (err) {
+            alert("Error joining: " + err.message);
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.innerText = "🚀 Enter Arena"; }
+        }
+
+        onValue(ref(database, `sessions/${pin}/players/${myPlayerId}`), (snap) => {
+            if (!snap.exists() && currentGamePin && currentGameState !== 'game_over') {
+                alert("You have been kicked by the host.");
+                window.location.reload();
+            }
+        });
+
+        onValue(ref(database, `sessions/${pin}`), (snapshot) => {
+            const d = snapshot.val();
+            if (!d) return; 
+            
+            currentGameState = d.state;
+            currentQuestionIndex = d.currentQuestionIndex;
+            currentTeamLabelMode = d.teamLabelMode || 'groups';
+
+            // Handle Special Events (Player-side only)
+            const playerMysteryOverlay = document.getElementById('player-mystery-box-overlay');
+            const playerBossOverlay = document.getElementById('player-boss-battle-overlay');
+            if (playerMysteryOverlay) playerMysteryOverlay.classList.add('hidden');
+            if (playerBossOverlay) playerBossOverlay.classList.add('hidden');
+
+            const isPlayerView = document.getElementById('view-player-leaderboard')?.classList.contains('active');
+
+            if (d.activeEvent === 'mystery_box' && isPlayerView) {
+                if (playerMysteryOverlay) {
+                    playerMysteryOverlay.classList.remove('hidden');
+                    const btnGrab = document.getElementById('btn-grab-mystery-box');
+                    if (d.mysteryBoxWinner) {
+                        btnGrab.innerText = d.mysteryBoxWinner === myPlayerId ? "🎉 YOU WON!" : "❌ TOO LATE!";
+                        btnGrab.disabled = true;
+                    } else {
+                        btnGrab.innerText = "GRAB IT!";
+                        btnGrab.disabled = false;
+                    }
+                }
+            } else if (d.activeEvent === 'boss_battle' && isPlayerView) {
+                if (playerBossOverlay) {
+                    playerBossOverlay.classList.remove('hidden');
+                    const btnAttack = document.getElementById('btn-attack-boss');
+                    const elapsed = Math.floor((Date.now() - (d.eventStartTime || Date.now())) / 1000);
+                    if (d.bossHp <= 0 || elapsed >= 15) {
+                        btnAttack.disabled = true;
+                        btnAttack.innerText = d.bossHp <= 0 ? "VICTORY!" : "FAILED!";
+                    } else {
+                        btnAttack.disabled = false;
+                        btnAttack.innerText = "ATTACK!";
+                    }
+                }
+            }
+
+            const pData = d.players?.[myPlayerId];
+            if (pData) {
+                renderPlayerInventory(pData.inventory || [], pData.team, d.teamMode, d.teamPools);
+                const isShielded = pData.shieldCount > 0 || pData.shieldActive;
+                const shieldBadge = document.getElementById('player-shield-indicator');
+                const dashShieldBadge = document.getElementById('player-dash-shield-indicator');
+                if (shieldBadge) shieldBadge.classList.toggle('hidden', !isShielded);
+                if (dashShieldBadge) dashShieldBadge.classList.toggle('hidden', !isShielded);
+            }
+
+            if (d.state === 'lobby' && pData) {
+                renderPlayerTeamPicker(d, pData);
+            }
+
+            if (d.state === 'question') {
+                const q = d.questions[d.currentQuestionIndex];
+                syncedPlayerQuestionPaused = Boolean(d.isPaused);
+                syncedPlayerQuestionStartTime = Number(d.questionStartTime) || Date.now();
+                syncedPlayerQuestionTimeLimit = Math.max(
+                    1,
+                    Number(q.timeLimit || q.dashboardData?.timeLimit) || 20
+                );
+                // Guard: skip re-initialization if same question already set up
+                const isNewQuestion = d.currentQuestionIndex !== lastInitializedQuestionIndex;
+                if (isNewQuestion) {
+                    lastInitializedQuestionIndex = d.currentQuestionIndex;
+                    hasAnsweredThisRound = false;
+                    // Lock answer buttons briefly to prevent ghost clicks during transition
+                    answerClickLocked = true;
+                    setTimeout(() => { answerClickLocked = false; }, 400);
+                }
+
+                if (q.dashboardData) {
+                    switchView('view-player-dashboard');
+                    const progEl = document.getElementById('player-dash-question-progress');
+                    if (progEl) progEl.innerText = `Question ${d.currentQuestionIndex + 1} of ${d.questions.length}`;
+                    document.getElementById('player-dash-question').innerText = q.text || q.dashboardData?.question || 'Tap the correct element';
+                    document.getElementById('player-dash-locked').classList.add('hidden');
+                    if (pData) {
+                        document.getElementById('player-dash-score').innerText = pData.score || 0;
+                        if (pData.hasAnswered) { hasAnsweredThisRound = true; document.getElementById('player-dash-locked').classList.remove('hidden'); }
+                        else { hasAnsweredThisRound = false; document.getElementById('player-dash-locked').classList.add('hidden'); }
+                    }
+                    if (pData?.team) {
+                        const tc = TEAM_COLORS.find(t => t.key === pData.team);
+                        const ti = document.getElementById('player-dash-team');
+                        if (tc && ti) { ti.innerText = formatTeamLabel(pData.team, d.teamLabelMode); ti.classList.remove('hidden'); ti.style.background = tc.color + '33'; ti.style.color = tc.color; }
+                    }
+                    if (q.dashboardData && isNewQuestion) renderPlayerChart(q.dashboardData, d.questionStartTime, q.timeLimit || q.dashboardData.timeLimit);
+                    if (isNewQuestion) startPointsDecayTicker(d.questionStartTime, q.timeLimit || q.dashboardData.timeLimit);
+
+                    clearInterval(playerDashTimerInterval);
+                    const timerEl = document.getElementById('player-dash-timer');
+                    let lastVibDash = -1;
+                    playerDashTimerInterval = setInterval(() => {
+                        if (d.isPaused) { timerEl.innerText = "⏸ PAUSED"; timerEl.classList.remove('warning'); return; }
+                        if (isTimeFrozenLocal) { timerEl.innerText = "❄️ FROZEN"; timerEl.classList.add('warning'); return; }
+                        const elapsed = (Date.now() - d.questionStartTime) / 1000;
+                        const limit = (q.timeLimit || q.dashboardData?.timeLimit || 30);
+                        const remaining = Math.max(0, Math.ceil(limit - elapsed));
+                        timerEl.innerText = remaining + 's';
+                        timerEl.classList.toggle('warning', remaining <= 5);
+                        if ('vibrate' in navigator && remaining !== lastVibDash) {
+                            if (remaining === 10) navigator.vibrate(100);
+                            else if (remaining === 5) navigator.vibrate([100, 50, 100]);
+                            else if (remaining === 3 || remaining === 2 || remaining === 1) navigator.vibrate([100, 30, 100]);
+                            lastVibDash = remaining;
+                        }
+                        if (remaining <= 0) clearInterval(playerDashTimerInterval);
+                    }, 500);
+                } else {
+                    document.getElementById('player-waiting-msg').classList.add('hidden');
+                    switchView('view-player-question');
+                    if (isNewQuestion) renderPlayerQuestionInterface(q);
+                    const progEl = document.getElementById('player-question-progress');
+                    if (progEl) progEl.innerText = `Question ${d.currentQuestionIndex + 1} of ${d.questions.length}`;
+                    if (isNewQuestion) startPointsDecayTicker(d.questionStartTime, q.timeLimit);
+
+                    clearInterval(playerTimerInterval);
+                    const timerEl = document.getElementById('player-timer');
+                    let lastVibClassic = -1;
+                    if (timerEl) {
+                        playerTimerInterval = setInterval(() => {
+                            if (d.isPaused) { timerEl.innerText = "⏸ PAUSED"; timerEl.classList.remove('warning'); return; }
+                            if (isTimeFrozenLocal) { timerEl.innerText = "❄️ FROZEN"; timerEl.classList.add('warning'); return; }
+                            const elapsed = (Date.now() - d.questionStartTime) / 1000;
+                            const remaining = Math.max(0, Math.ceil(q.timeLimit - elapsed));
+                            timerEl.innerText = remaining + 's';
+                            timerEl.classList.toggle('warning', remaining <= 5);
+                            if ('vibrate' in navigator && remaining !== lastVibClassic) {
+                                if (remaining === 10) navigator.vibrate(100);
+                                else if (remaining === 5) navigator.vibrate([100, 50, 100]);
+                                else if (remaining === 3 || remaining === 2 || remaining === 1) navigator.vibrate([100, 30, 100]);
+                                lastVibClassic = remaining;
+                            }
+                            if (remaining <= 0) clearInterval(playerTimerInterval);
+                        }, 500);
+                    }
+
+                    if (isNewQuestion) {
+                        document.querySelectorAll('.answer-btn').forEach(b => b.classList.remove('selected', 'disabled-answer'));
+                    }
+                    if (pData) {
+                        if (pData.hasAnswered) { hasAnsweredThisRound = true; document.getElementById('player-waiting-msg').classList.remove('hidden'); }
+                        else { hasAnsweredThisRound = false; document.getElementById('player-waiting-msg').classList.add('hidden'); }
+                        if (pData.streak >= 3) { document.getElementById('player-streak-badge').classList.remove('hidden'); document.getElementById('player-streak-count').innerText = pData.streak; }
+                        else document.getElementById('player-streak-badge').classList.add('hidden');
+                    }
+                }
+            } else {
+                clearInterval(playerTimerInterval);
+                clearInterval(playerDashTimerInterval);
+                document.querySelectorAll('.answer-btn').forEach(btn => btn.style.order = '');
+                const pData = d.players[myPlayerId];
+                if (pData && (d.state === 'results' || d.state === 'results_dash')) {
+                    switchView('view-player-result');
+                    const correctAnswer = document.getElementById('player-correct-answer');
+                    const correctAnswerText = document.getElementById('player-correct-answer-text');
+                    if (correctAnswer && correctAnswerText && d.resultAnswer && d.resultQuestionType !== 'poll') {
+                        correctAnswerText.textContent = d.resultAnswer;
+                        correctAnswer.classList.remove('hidden');
+                    } else {
+                        correctAnswer?.classList.add('hidden');
+                    }
+                    document.getElementById('player-total-score').innerText = pData.score;
+                    document.getElementById('player-points-earned').innerText = pData.lastPointsEarned;
+                    document.getElementById('player-score-display').innerText = pData.score;
+
+                    const allPlayers = Object.values(d.players || {}).sort((a, b) => b.score - a.score);
+                    const currentRank = allPlayers.findIndex(p => p.name === myNickname) + 1;
+                    document.getElementById('player-rank-number').innerText = currentRank;
+                    document.getElementById('player-rank-total').innerText = allPlayers.length;
+
+                    const movementEl = document.getElementById('player-rank-movement');
+                    if (previousRank !== null && previousRank !== currentRank) {
+                        const diff = previousRank - currentRank;
+                        if (diff > 0) { movementEl.className = 'rank-movement up'; movementEl.innerText = `↑${diff} place${diff > 1 ? 's' : ''}`; }
+                        else { movementEl.className = 'rank-movement down'; movementEl.innerText = `↓${Math.abs(diff)} place${Math.abs(diff) > 1 ? 's' : ''}`; }
+                    } else {
+                        movementEl.className = 'rank-movement same'; movementEl.innerText = '— same';
+                    }
+                    previousRank = currentRank;
+                    
+                    const title = document.getElementById('player-result-title');
+                    const badge = document.getElementById('player-points-earned').parentElement;
+                    
+                    if (d.resultQuestionType === 'poll') {
+                        title.innerText = "Opinion Recorded!";
+                        badge.className = "points-badge mt-2 result-correct";
+                        document.getElementById('player-points-earned').innerText = "0";
+                        document.getElementById('player-result-streak-msg').classList.add('hidden');
+                    } else if (pData.lastAnswerCorrect) {
+                        title.innerText = "Correct!";
+                        badge.className = "points-badge mt-2 result-correct";
+                        document.getElementById('player-result-streak-msg').classList.toggle('hidden', !pData.isStreakMultiplierActive);
+                    } else if (!pData.hasAnswered) {
+                        title.innerText = "Time's Up!";
+                        badge.className = "points-badge mt-2 result-incorrect";
+                        document.getElementById('player-points-earned').innerText = "0";
+                        document.getElementById('player-result-streak-msg').classList.add('hidden');
+                    } else {
+                        title.innerText = "Incorrect!";
+                        badge.className = "points-badge mt-2 result-incorrect";
+                        document.getElementById('player-points-earned').innerText = "0";
+                        document.getElementById('player-result-streak-msg').classList.add('hidden');
+                    }
+
+                    const breakdownEl = document.getElementById('player-points-breakdown');
+                    if (breakdownEl) {
+                        if (pData.lastAnswerCorrect) {
+                            const base = pData.receiptBase || 500;
+                            const speed = pData.receiptSpeed || 0;
+                            const streakBonus = pData.receiptStreak || 0;
+                            const doubleMultiplier = pData.receiptDouble ? 2 : 1;
+                            const total = (base + speed + streakBonus) * doubleMultiplier;
+                            
+                            breakdownEl.innerHTML = `
+                                <div class="receipt-row" style="display:flex; justify-content:space-between; margin-bottom:0.25rem;"><span>Base Points:</span><span>+${base}</span></div>
+                                <div class="receipt-row" style="display:flex; justify-content:space-between; margin-bottom:0.25rem;"><span>Speed Bonus:</span><span>+${speed}</span></div>
+                                <div class="receipt-row" style="display:flex; justify-content:space-between; margin-bottom:0.25rem;"><span>Streak Multiplier:</span><span>+${streakBonus}</span></div>
+                                ${doubleMultiplier > 1 ? '<div class="receipt-row" style="display:flex; justify-content:space-between; margin-bottom:0.25rem; color:var(--color-primary); font-weight:bold;"><span>Double Points Active!</span><span>2x Multiplier</span></div>' : ''}
+                                <hr style="border-color:rgba(255,255,255,0.1); margin:0.5rem 0;">
+                                <div class="receipt-row" style="display:flex; justify-content:space-between; font-weight:bold;"><span>Total Points Received:</span><span>+${total}</span></div>
+                            `;
+                        } else {
+                            breakdownEl.innerHTML = `<div class="receipt-row" style="color:var(--color-red); text-align:center; width:100%;">No points received for this round.</div>`;
+                        }
+                        breakdownEl.classList.remove('hidden');
+                    }
+                }
+            }
+            
+            if (d.state === 'leaderboard' || d.state === 'game_over') {
+                switchView('view-player-leaderboard');
+                if (d.state === 'game_over') {
+                    document.getElementById('player-lb-title').innerText = "Game Over!";
+                    document.getElementById('player-lb-msg').innerText = "Thanks for playing!";
+                    document.getElementById('player-strategy-banner').style.display = 'none';
+                } else {
+                    document.getElementById('player-lb-title').innerText = "Leaderboard";
+                    document.getElementById('player-lb-msg').innerText = "Waiting for next question...";
+                    document.getElementById('player-strategy-banner').style.display = 'block';
+                }
+
+                const playersObj = d.players || {};
+                const allSorted = Object.values(playersObj).sort((a, b) => b.score - a.score);
+                const top5 = allSorted.slice(0, 5);
+                const listEl = document.getElementById('player-lb-list');
+                listEl.innerHTML = '';
+
+                const myRankIdx = allSorted.findIndex(p => p.name === myNickname);
+                const myInTop5 = myRankIdx >= 0 && myRankIdx < 5;
+                
+                top5.forEach((p, idx) => {
+                    let teamEmoji = '';
+                    if (d.teamMode && p.team) {
+                        teamEmoji = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(p.team, d.teamLabelMode)}</span>`;
+                    }
+                    const el = document.createElement('div');
+                    el.className = p.name === myNickname ? 'leaderboard-row fade-in-up my-row' : 'leaderboard-row fade-in-up';
+                    el.innerHTML = `<span>${idx + 1}. ${teamEmoji}${p.name}</span><span>${p.score} pts</span>`;
+                    listEl.appendChild(el);
+                });
+
+                if (!myInTop5 && myRankIdx >= 0) {
+                    const sep = document.createElement('div');
+                    sep.className = 'lb-separator';
+                    sep.innerHTML = 'Your Position';
+                    listEl.appendChild(sep);
+
+                    if (myRankIdx > 0 && myRankIdx - 1 >= 5) {
+                        const aboveData = allSorted[myRankIdx - 1];
+                        let aboveTeam = '';
+                        if (d.teamMode && aboveData.team) {
+                            aboveTeam = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(aboveData.team, d.teamLabelMode)}</span>`;
+                        }
+                        const aboveEl = document.createElement('div');
+                        aboveEl.className = 'leaderboard-row fade-in-up';
+                        aboveEl.style.opacity = '0.6';
+                        aboveEl.innerHTML = `<span>${myRankIdx}. ${aboveTeam}${aboveData.name}</span><span>${aboveData.score} pts</span>`;
+                        listEl.appendChild(aboveEl);
+                    }
+
+                    const myData = allSorted[myRankIdx];
+                    let myTeam = '';
+                    if (d.teamMode && myData.team) {
+                        myTeam = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(myData.team, d.teamLabelMode)}</span>`;
+                    }
+                    const myEl = document.createElement('div');
+                    myEl.className = 'leaderboard-row fade-in-up my-row';
+                    myEl.innerHTML = `<span>${myRankIdx + 1}. ${myTeam}${myData.name}</span><span>${myData.score} pts</span>`;
+                    listEl.appendChild(myEl);
+
+                    if (myRankIdx + 1 < allSorted.length) {
+                        const belowData = allSorted[myRankIdx + 1];
+                        let belowTeam = '';
+                        if (d.teamMode && belowData.team) {
+                            belowTeam = `<span style="font-size: 0.72em; margin-right: 4px;">${formatTeamShort(belowData.team, d.teamLabelMode)}</span>`;
+                        }
+                        const belowEl = document.createElement('div');
+                        belowEl.className = 'leaderboard-row fade-in-up';
+                        belowEl.style.opacity = '0.6';
+                        belowEl.innerHTML = `<span>${myRankIdx + 2}. ${belowTeam}${belowData.name}</span><span>${belowData.score} pts</span>`;
+                        listEl.appendChild(belowEl);
+                    }
+                }
+
+                if (d.teamMode) renderTeamScores(playersObj, document.getElementById('player-team-scores'), false);
+            }
+        });
+    });
+
+    // Handle classic selection options input
+    document.querySelectorAll('.answer-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (currentGameState !== 'question' || hasAnsweredThisRound || answerClickLocked) return;
+            if (isTimeFrozenLocal) {
+                showToast("❄️ You are frozen! Wait until you thaw to answer.");
+                return;
+            }
+            
+            // Eagerly lock UI to provide instant feedback and prevent duplicate spam clicks
+            hasAnsweredThisRound = true;
+            const clickedBtn = e.currentTarget;
+            document.querySelectorAll('.answer-btn').forEach(b => {
+                if (b === clickedBtn) b.classList.add('selected');
+                else b.classList.add('disabled-answer');
+            });
+            document.getElementById('player-waiting-msg').classList.remove('hidden');
+
+            const ansIdx = parseInt(clickedBtn.getAttribute('data-index'));
+            const sessionRef = ref(database, `sessions/${currentGamePin}`);
+            const snap = await get(sessionRef);
+            
+            if (!snap.exists()) {
+                hasAnsweredThisRound = false;
+                document.getElementById('player-waiting-msg').classList.add('hidden');
+                document.querySelectorAll('.answer-btn').forEach(b => b.classList.remove('selected', 'disabled-answer'));
+                return;
+            }
+            
+            const d = snap.val();
+
+            if (d.state !== 'question' || d.currentQuestionIndex !== currentQuestionIndex) {
+                hasAnsweredThisRound = false;
+                document.getElementById('player-waiting-msg').classList.add('hidden');
+                document.querySelectorAll('.answer-btn').forEach(b => b.classList.remove('selected', 'disabled-answer'));
+                return showToast("That question has already closed.");
+            }
+            if (d.isPaused) {
+                hasAnsweredThisRound = false;
+                document.getElementById('player-waiting-msg').classList.add('hidden');
+                document.querySelectorAll('.answer-btn').forEach(b => b.classList.remove('selected', 'disabled-answer'));
+                return alert("The host has paused the game. You cannot answer right now.");
+            }
+            if (d.players && d.players[myPlayerId] && d.players[myPlayerId].answeredQuestionIndex === currentQuestionIndex) return;
+
+            const q = questions[currentQuestionIndex];
+            const isCorrect = ansIdx === q.correct;
+            const timeElapsed = (Date.now() - d.questionStartTime) / 1000;
+
+            let points = 0;
+            let newStreak = d.players[myPlayerId].streak || 0;
+            let isStreakMultiplierActive = false;
+
+            let receiptBase = 0, receiptSpeed = 0, receiptStreak = 0, receiptDouble = q.isDoublePoints || false;
+
+            if (isCorrect) {
+                receiptBase = 500;
+                receiptSpeed = Math.floor(Math.max(0, 500 * (1 - (timeElapsed / q.timeLimit))));
+                newStreak += 1;
+                if (newStreak >= 3) {
+                    receiptStreak = Math.floor((receiptBase + receiptSpeed) * 0.2);
+                    isStreakMultiplierActive = true;
+                }
+                points = receiptBase + receiptSpeed + receiptStreak;
+                if (receiptDouble) points *= 2;
+                if (d.players[myPlayerId].speedBoostActive) points = Math.floor(points * 1.5);
+                if (d.players[myPlayerId].multiplierActive) points = Math.floor(points * 2);
+            } else {
+                newStreak = 0;
+            }
+
+            const awardedInventory = awardRandomPowerupIfDeserving(isCorrect, newStreak, timeElapsed, d.players[myPlayerId].inventory || []);
+
+            const playerUpdates = {};
+            playerUpdates[`players/${myPlayerId}/hasAnswered`] = true;
+            playerUpdates[`players/${myPlayerId}/answeredQuestionIndex`] = currentQuestionIndex;
+            playerUpdates[`players/${myPlayerId}/lastAnswerCorrect`] = isCorrect;
+            playerUpdates[`players/${myPlayerId}/lastPointsEarned`] = points;
+            playerUpdates[`players/${myPlayerId}/score`] = d.players[myPlayerId].score + points;
+            playerUpdates[`players/${myPlayerId}/streak`] = newStreak;
+            playerUpdates[`players/${myPlayerId}/isStreakMultiplierActive`] = isStreakMultiplierActive;
+            playerUpdates[`players/${myPlayerId}/inventory`] = awardedInventory;
+            if (d.players[myPlayerId].speedBoostActive) playerUpdates[`players/${myPlayerId}/speedBoostActive`] = false;
+            if (d.players[myPlayerId].multiplierActive) playerUpdates[`players/${myPlayerId}/multiplierActive`] = false;
+            playerUpdates[`players/${myPlayerId}/receiptBase`] = receiptBase;
+            playerUpdates[`players/${myPlayerId}/receiptSpeed`] = receiptSpeed;
+            playerUpdates[`players/${myPlayerId}/receiptStreak`] = receiptStreak;
+            playerUpdates[`players/${myPlayerId}/receiptDouble`] = receiptDouble;
+            playerUpdates[`answersCount/${ansIdx}`] = increment(1);
+            playerUpdates[`totalAnswers`] = increment(1);
+            playerUpdates[`answers/${myPlayerId}`] = { questionIndex: currentQuestionIndex, optionIndex: ansIdx, elapsedTime: Math.round(timeElapsed * 1000) };
+
+            await update(sessionRef, playerUpdates);
+        });
+    });
+
+    // Reaction click dispatch emitter
+    document.querySelectorAll('.btn-emoji').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            if (!currentGamePin || emojiCooldown) return;
+            const emoji = e.currentTarget.getAttribute('data-emoji');
+            push(ref(database, `sessions/${currentGamePin}/reactions`), { emoji: emoji, timestamp: Date.now(), uid: myPlayerId });
+
+            emojiCooldown = true;
+            document.querySelectorAll('.btn-emoji').forEach(b => b.classList.add('on-cooldown'));
+            setTimeout(() => {
+                emojiCooldown = false;
+                document.querySelectorAll('.btn-emoji').forEach(b => b.classList.remove('on-cooldown'));
+            }, 2000);
+        });
+    });
+
+    document.querySelectorAll('.btn-smack-talk').forEach(btn => {
+        btn.onclick = () => {
+            if (!currentGamePin) return;
+            const text = btn.getAttribute('data-text');
+            push(ref(database, `sessions/${currentGamePin}/chat`), { text: text, name: myNickname, timestamp: Date.now() });
+            btn.innerText = "Sent!";
+            btn.disabled = true;
+            setTimeout(() => {
+                btn.innerText = text;
+                btn.disabled = false;
+            }, 3000);
+        };
+    });
+
+    const hypeBtn = document.getElementById('btn-player-hype');
+    if (hypeBtn) {
+        let hypeCooldown = false;
+        hypeBtn.addEventListener('click', () => {
+            if (!currentGamePin || hypeCooldown) return;
+            update(ref(database, `sessions/${currentGamePin}`), { hype: increment(1) });
+            hypeCooldown = true;
+            hypeBtn.style.transform = 'scale(0.9)';
+            setTimeout(() => {
+                hypeCooldown = false;
+                hypeBtn.style.transform = 'scale(1)';
+            }, 200);
         });
     }
 
-    const nextBtn = document.getElementById("btn-next-question");
-    const backBtn = document.getElementById("btn-back-dashboard");
+    // Wire global inventory action nodes
+    document.getElementById('btn-donate-item')?.addEventListener('click', toggleDonateMode);
+    document.getElementById('btn-dash-donate-item')?.addEventListener('click', toggleDonateMode);
+    document.getElementById('btn-strategy-donate-item')?.addEventListener('click', toggleDonateMode);
+    document.getElementById('btn-player-tutorial')?.addEventListener('click', () => {
+        const modal = document.getElementById('tutorial-modal');
+        if (modal) { modal.style.display = 'flex'; modal.classList.remove('hidden'); initTutorialCarousel(); }
+    });
+    document.getElementById('btn-host-tutorial')?.addEventListener('click', () => {
+        const modal = document.getElementById('tutorial-modal');
+        if (modal) { modal.style.display = 'flex'; modal.classList.remove('hidden'); initTutorialCarousel(); }
+    });
+    document.getElementById('btn-close-tutorial')?.addEventListener('click', () => {
+        const modal = document.getElementById('tutorial-modal');
+        if (modal) { modal.style.display = 'none'; modal.classList.add('hidden'); }
+    });
+    document.getElementById('btn-cancel-target')?.addEventListener('click', () => {
+        document.getElementById('player-target-modal')?.classList.add('hidden');
+        selectedInventoryIndex = null;
+        document.querySelectorAll('.inventory-slot').forEach(s => s.classList.remove('selected'));
+    });
 
-    if (hostActiveQuestionIndex + 1 < currentQuizData.questions.length) {
-        nextBtn.innerText = "Next Question";
-        nextBtn.classList.remove("hidden");
-        backBtn.classList.add("hidden");
-        nextBtn.onclick = () => { hostActiveQuestionIndex++; executeQuestionBroadcast(); };
-    } else {
-        nextBtn.classList.add("hidden");
-        backBtn.classList.remove("hidden");
-        backBtn.innerText = "Conclude Workshop Session";
-        await update(gameSessionRef, {
-            status: "gameover",
-            "publicState/status": "gameover"
-        });
-        backBtn.onclick = async () => {
-            const playersCount = playersSnapshot.exists() ? Object.keys(playersSnapshot.val()).length : 0;
-            const correctRatio = sessionTotalAnswersCount > 0 ? (sessionTotalCorrectAnswersCount / sessionTotalAnswersCount) : 0.92;
-            const sessionScorePercent = Math.round(correctRatio * 100);
+    let currentAdminTargetId = null;
+    window.openAdminModal = function(playerId, playerName) {
+        currentAdminTargetId = playerId;
+        document.getElementById('admin-target-name').innerText = `Adjusting: ${playerName}`;
+        document.getElementById('admin-points-input').value = '';
+        document.getElementById('admin-powerup-select').value = '';
+        
+        const specialEvents = document.getElementById('admin-special-events-container');
+        if (specialEvents) specialEvents.style.display = playerId === 'ALL' ? 'block' : 'none';
 
-            let history = [];
-            try {
-                const savedHistory = localStorage.getItem("powerbi_recent_sessions");
-                if (savedHistory) {
-                    history = JSON.parse(savedHistory);
+        const modal = document.getElementById('host-admin-modal');
+        if (modal) { modal.style.display = 'flex'; modal.classList.remove('hidden'); }
+    };
+
+    document.getElementById('btn-global-admin')?.addEventListener('click', () => {
+        openAdminModal('ALL', 'Everyone (Global Override)');
+    });
+
+    document.getElementById('btn-admin-cancel')?.addEventListener('click', () => {
+        const modal = document.getElementById('host-admin-modal');
+        if (modal) { modal.style.display = 'none'; modal.classList.add('hidden'); }
+    });
+
+    document.getElementById('btn-admin-save')?.addEventListener('click', async () => {
+        if (!currentAdminTargetId || !currentGamePin) return;
+        const pts = parseInt(document.getElementById('admin-points-input').value) || 0;
+        const pwr = document.getElementById('admin-powerup-select').value;
+        
+        if (currentAdminTargetId === 'ALL') {
+            const playersRef = ref(database, `sessions/${currentGamePin}/players`);
+            const snap = await get(playersRef);
+            if (!snap.exists()) return;
+            const players = snap.val();
+            const updates = {};
+            
+            Object.keys(players).forEach(pId => {
+                const pData = players[pId];
+                if (pts !== 0) {
+                    updates[`players/${pId}/score`] = (pData.score || 0) + pts;
                 }
-            } catch (err) {}
+                if (pwr) {
+                    const randomPowers = ['steal', 'freeze', 'shield', 'multiplier', 'redacted'];
+                    const powerType = pwr === 'random' ? randomPowers[Math.floor(Math.random() * randomPowers.length)] : pwr;
+                    const inv = pData.inventory || [];
+                    if (inv.length < 3) {
+                        inv.push(normalizePowerupItem({ type: powerType, acquiredAt: Date.now() }));
+                        updates[`players/${pId}/inventory`] = inv;
+                    }
+                }
+            });
+            
+            if (Object.keys(updates).length > 0) {
+                await update(ref(database, `sessions/${currentGamePin}`), updates);
+            }
+        } else {
+            const playerRef = ref(database, `sessions/${currentGamePin}/players/${currentAdminTargetId}`);
+            const snap = await get(playerRef);
+            if (snap.exists()) {
+                const updates = {};
+                if (pts !== 0) updates.score = increment(pts);
+                
+                if (pwr) {
+                    const randomPowers = ['steal', 'freeze', 'shield', 'multiplier', 'redacted'];
+                    const powerType = pwr === 'random' ? randomPowers[Math.floor(Math.random() * randomPowers.length)] : pwr;
+                    const pData = snap.val();
+                    const inv = pData.inventory || [];
+                    if (inv.length < 3) {
+                        inv.push(normalizePowerupItem({ type: powerType, acquiredAt: Date.now() }));
+                        updates.inventory = inv;
+                    } else {
+                        alert("Player inventory is full (max 3 items). Cannot grant power-up.");
+                    }
+                }
+                
+                if (Object.keys(updates).length > 0) {
+                    await update(playerRef, updates);
+                }
+            }
+        }
+        
+        document.getElementById('btn-admin-cancel').click();
+        
+        // Refresh the host leaderboard to reflect changes
+        if (document.getElementById('view-host-leaderboard')?.classList.contains('active')) {
+            renderHostLeaderboardContent();
+        }
+    });
 
-            history.push({
-                date: new Date().toLocaleDateString(),
-                quizTitle: currentQuizData.title,
-                playersCount: playersCount,
-                accuracy: sessionScorePercent
+    document.getElementById('btn-admin-mystery-box')?.addEventListener('click', async () => {
+        if (!currentGamePin) return;
+        await update(ref(database, `sessions/${currentGamePin}`), {
+            activeEvent: 'mystery_box',
+            mysteryBoxWinner: null,
+            eventStartTime: Date.now()
+        });
+        document.getElementById('btn-admin-cancel').click();
+    });
+
+    document.getElementById('btn-admin-boss')?.addEventListener('click', async () => {
+        if (!currentGamePin) return;
+        await update(ref(database, `sessions/${currentGamePin}`), {
+            activeEvent: 'boss_battle',
+            bossHp: 1000,
+            bossMaxHp: 1000,
+            eventStartTime: Date.now()
+        });
+        document.getElementById('btn-admin-cancel').click();
+    });
+
+    // Leave Room — player self-removal
+    document.getElementById('btn-leave-room')?.addEventListener('click', async () => {
+        if (!currentGamePin || !myPlayerId) return;
+        if (confirm("Are you sure you want to leave the room?")) {
+            await remove(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`));
+            currentGamePin = null;
+            myPlayerId = null;
+            myNickname = null;
+            currentGameState = null;
+            lastInitializedQuestionIndex = -1;
+            sessionStorage.removeItem('dashboard_wars_player_session');
+            switchView('view-landing');
+        }
+    });
+    document.getElementById('btn-player-sync-view')?.addEventListener('click', async () => {
+        if (!currentGamePin || !myPlayerId) {
+            switchView('view-player-join');
+            return;
+        }
+        const syncButton = document.getElementById('btn-player-sync-view');
+        syncButton.disabled = true;
+        syncButton.textContent = 'Syncing…';
+        try {
+            lastInitializedQuestionIndex = -1;
+            await update(ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`), {
+                lastSyncRequest: Date.now(),
+                online: true
+            });
+            showToast('Game view synced.', '#2563eb');
+        } catch (error) {
+            showToast('Sync failed. Check your connection and try again.');
+        } finally {
+            syncButton.disabled = false;
+            syncButton.textContent = '🔄 Sync';
+        }
+    });
+
+    // Special Event Interactivity
+    document.getElementById('btn-grab-mystery-box')?.addEventListener('click', async () => {
+        if (!currentGamePin || !myPlayerId) return;
+        const btn = document.getElementById('btn-grab-mystery-box');
+        if (btn.disabled) return;
+        btn.disabled = true;
+        btn.innerText = "GRABBING...";
+
+        const boxRef = ref(database, `sessions/${currentGamePin}/mysteryBoxWinner`);
+        
+        try {
+            const result = await runTransaction(boxRef, (currentData) => {
+                if (currentData === null) {
+                    return myPlayerId;
+                }
+                return; // Abort if already claimed
             });
 
-            try {
-                localStorage.setItem("powerbi_recent_sessions", JSON.stringify(history));
-            } catch (err) {}
-            
-            await syncHistoryToFirebase(history);
-            terminateRoomInstance();
-        };
-    }
-    switchView("hostLeaderboard");
-}
-
-// ==========================================
-// 6. PLAYER ARCHITECTURE LOGIC PIPELINES
-// ==========================================
-function getOrCreatePlayerClientId() {
-    if (playerClientId) return playerClientId;
-    try {
-        playerClientId = localStorage.getItem("powerbi_player_client_id");
-        if (!playerClientId) {
-            playerClientId = globalThis.crypto?.randomUUID?.()
-                || `client_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
-            localStorage.setItem("powerbi_player_client_id", playerClientId);
-        }
-    } catch (e) {
-        playerClientId = `client_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
-    }
-    return playerClientId;
-}
-
-function nicknameClaimKey(nickname) {
-    return Array.from(nickname.trim().normalize("NFKC").toLocaleLowerCase())
-        .map(char => char.codePointAt(0).toString(16))
-        .join("-");
-}
-
-function isPlayerOnline(player) {
-    if (player?.presenceVersion === 2) {
-        return Boolean(player.connections && Object.keys(player.connections).length > 0);
-    }
-    return player?.online !== false;
-}
-
-function persistPlayerSession() {
-    sessionStorage.setItem("powerbi_player_session_pin", currentSessionPin);
-    sessionStorage.setItem("powerbi_player_nickname", myNickname);
-    sessionStorage.setItem("powerbi_player_key", myPlayerKey);
-    sessionStorage.setItem("powerbi_player_role", "player");
-}
-
-async function reserveNickname(pin, nickname, candidatePlayerKey, clientId) {
-    const claimRef = ref(database, `${SESSION_ROOT}/${pin}/nicknameClaims/${nicknameClaimKey(nickname)}`);
-    const createClaim = playerKey => ({ playerKey, clientId, nickname, claimedAt: Date.now() });
-
-    let result = await runTransaction(claimRef, current => {
-        if (current === null) return createClaim(candidatePlayerKey);
-        if (current.clientId === clientId) return createClaim(current.playerKey || candidatePlayerKey);
-        return;
-    });
-    if (result.committed) return { claim: result.snapshot.val(), replacedPlayerKey: null };
-
-    const blockingClaim = result.snapshot.val();
-    if (!blockingClaim?.playerKey) throw new Error("NICKNAME_TAKEN");
-    const blockingPlayerSnap = await get(ref(database, `${SESSION_ROOT}/${pin}/players/${blockingClaim.playerKey}`));
-    const claimAge = Date.now() - (blockingClaim.claimedAt || 0);
-    if (!blockingPlayerSnap.exists() && claimAge < 15000) {
-        throw new Error("NICKNAME_TAKEN");
-    }
-    if (blockingPlayerSnap.exists() && isPlayerOnline(blockingPlayerSnap.val())) {
-        throw new Error("NICKNAME_TAKEN");
-    }
-
-    result = await runTransaction(claimRef, current => {
-        if (
-            current
-            && current.clientId === blockingClaim.clientId
-            && current.playerKey === blockingClaim.playerKey
-        ) {
-            return createClaim(candidatePlayerKey);
-        }
-        return;
-    });
-    if (!result.committed) throw new Error("NICKNAME_TAKEN");
-    return { claim: result.snapshot.val(), replacedPlayerKey: blockingClaim.playerKey };
-}
-
-async function configurePlayerPresence(pin, nickname, playerKey) {
-    if (!playerConnectionId) {
-        playerConnectionId = `connection_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    }
-    const connectionRef = ref(
-        database,
-        `${SESSION_ROOT}/${pin}/players/${playerKey}/connections/${playerConnectionId}`
-    );
-    await onDisconnect(connectionRef).remove();
-    await set(connectionRef, true);
-}
-
-async function releaseCurrentPlayer() {
-    if (!isFirebaseEnabled || !currentSessionPin || !myPlayerKey) {
-        unsubscribeActiveListeners();
-        clearPlayerSessionStorage();
-        switchView("landing");
-        return;
-    }
-
-    const pin = currentSessionPin;
-    const playerKey = myPlayerKey;
-    const clientId = getOrCreatePlayerClientId();
-    const claimRef = ref(database, `${SESSION_ROOT}/${pin}/nicknameClaims/${nicknameClaimKey(myNickname)}`);
-    unsubscribeActiveListeners();
-    await Promise.allSettled([
-        remove(ref(database, `${SESSION_ROOT}/${pin}/players/${playerKey}`)),
-        runTransaction(claimRef, current => (
-            current?.clientId === clientId && current?.playerKey === playerKey ? null : undefined
-        ))
-    ]);
-
-    clearPlayerSessionStorage();
-    currentSessionPin = null;
-    myPlayerKey = null;
-    myNickname = "";
-    currentRole = null;
-    playerConnectionId = null;
-    switchView("landing");
-}
-
-function installPlayerLeaveControls() {
-    ["playerLobby", "playerQuestion", "playerResult", "playerLeaderboard"].forEach(viewKey => {
-        const view = views[viewKey];
-        if (!view || view.querySelector(".btn-player-leave")) return;
-        const target = viewKey === "playerQuestion"
-            ? view.querySelector(".player-header > div:last-child")
-            : view.querySelector(".glass-panel");
-        if (!target) return;
-
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "btn-text btn-player-leave";
-        button.textContent = viewKey === "playerQuestion" ? "Leave" : "Leave Session";
-        button.setAttribute("aria-label", "Leave session");
-        button.addEventListener("click", () => {
-            if (confirm("Leave this session? Your current player entry will be removed.")) {
-                releaseCurrentPlayer();
+            if (result.committed) {
+                // I won!
+                const points = Math.random() > 0.5 ? 1000 : 500;
+                const pwr = ['steal', 'freeze', 'shield', 'multiplier'][Math.floor(Math.random() * 4)];
+                const playerRef = ref(database, `sessions/${currentGamePin}/players/${myPlayerId}`);
+                const pSnap = await get(playerRef);
+                if (pSnap.exists()) {
+                    const pData = pSnap.val();
+                    const inv = pData.inventory || [];
+                    const updates = { score: increment(points) };
+                    if (inv.length < 3) {
+                        inv.push(normalizePowerupItem({ type: pwr, acquiredAt: Date.now() }));
+                        updates.inventory = inv;
+                    }
+                    await update(playerRef, updates);
+                }
+            } else {
+                btn.innerText = "❌ TOO LATE!";
             }
-        });
-        target.appendChild(button);
+        } catch (error) {
+            console.error("Mystery box error:", error);
+            btn.disabled = false;
+            btn.innerText = "GRAB IT!";
+        }
     });
-}
 
-function setupPlayerParticipationWorkflow() {
-    getOrCreatePlayerClientId();
-    installPlayerLeaveControls();
-
-    const pinFromUrl = new URLSearchParams(window.location.search).get("pin");
-    if (pinFromUrl && /^\d{6}$/.test(pinFromUrl)) {
-        document.getElementById("input-pin").value = pinFromUrl;
-        switchView("playerJoin");
-    }
-
-    const savedName = localStorage.getItem("powerbi_last_nickname");
-    if (savedName) {
-        const inputNickname = document.getElementById("input-nickname");
-        if (inputNickname) inputNickname.value = savedName;
-    }
-
-    const joinForm = document.getElementById("form-join");
-    joinForm?.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const pinInput = document.getElementById("input-pin").value.trim();
-        const nameInput = document.getElementById("input-nickname").value.trim();
+    document.getElementById('btn-attack-boss')?.addEventListener('click', () => {
+        if (!currentGamePin || !myPlayerId) return;
         
-        if (!/^\d{6}$/.test(pinInput)) {
-            alert("Please enter a valid six-digit game PIN.");
-            return;
-        }
-        if (nameInput.length < 2) {
-            alert("Please enter a nickname with at least 2 characters.");
-            return;
-        }
+        const btn = document.getElementById('btn-attack-boss');
+        if (btn.disabled) return;
 
-        localStorage.setItem("powerbi_last_nickname", nameInput);
-        const submitBtn = document.getElementById("btn-join-submit");
+        // Instant Visual feedback
+        btn.style.transform = 'scale(0.9)';
+        setTimeout(() => btn.style.transform = 'scale(1)', 50);
 
-        if (!isFirebaseEnabled) {
-            myNickname = nameInput;
-            currentSessionPin = pinInput;
-            currentRole = "player";
-            myPlayerKey = `offline_${getOrCreatePlayerClientId()}`;
-            persistPlayerSession();
-            document.getElementById("display-player-name").innerText = myNickname;
-            updatePlayerPinDisplays();
-            switchView("playerLobby");
-            return;
-        }
-
-        try {
-            submitBtn.disabled = true;
-            const sessionSnap = await get(ref(database, `${SESSION_ROOT}/${pinInput}`));
-
-            if (!sessionSnap.exists()) {
-                alert("Game room code not found.");
-                return;
-            }
-            if (sessionSnap.val().status === "gameover") {
-                alert("This game session has already ended.");
-                return;
-            }
-
-            currentSessionPin = pinInput;
-            myNickname = nameInput;
-            currentRole = "player";
-
-            const playerListRef = ref(database, `${SESSION_ROOT}/${pinInput}/players`);
-            const candidatePlayerKey = push(playerListRef).key;
-            const clientId = getOrCreatePlayerClientId();
-            const reservation = await reserveNickname(pinInput, nameInput, candidatePlayerKey, clientId);
-            myPlayerKey = reservation.claim.playerKey;
-
-            if (reservation.replacedPlayerKey && reservation.replacedPlayerKey !== myPlayerKey) {
-                await remove(ref(database, `${SESSION_ROOT}/${pinInput}/players/${reservation.replacedPlayerKey}`));
-            }
-
-            const playerRef = ref(database, `${SESSION_ROOT}/${pinInput}/players/${myPlayerKey}`);
-            const existingPlayerSnap = await get(playerRef);
-            if (existingPlayerSnap.exists() && existingPlayerSnap.val().clientId === clientId) {
-                await update(playerRef, {
-                    nickname: myNickname,
-                    online: true,
-                    presenceVersion: 2,
-                    lastSeen: Date.now()
-                });
-            } else {
-                await set(playerRef, {
-                    clientId,
-                    nickname: myNickname,
-                    score: 0,
-                    streak: 0,
-                    lastPointsEarned: 0,
-                    wasCorrect: false,
-                    online: true,
-                    presenceVersion: 2,
-                    joinedAt: Date.now(),
-                    lastSeen: Date.now()
-                });
-            }
-            await configurePlayerPresence(pinInput, myNickname, myPlayerKey);
-            persistPlayerSession();
-            
-            document.getElementById("display-player-name").innerText = myNickname;
-            updatePlayerPinDisplays();
-            switchView("playerLobby");
-            bindPlayerSessionSyncPipeline();
-
-        } catch (err) {
-            if (err.message === "NICKNAME_TAKEN") {
-                alert("That nickname is already in use. Please choose another.");
-                return;
-            }
-            console.error("Firebase join failed:", err);
-            alert("Unable to join the live session. Check your connection and try again.");
-        } finally {
-            submitBtn.disabled = false;
-        }
+        // Optimistic Fire-and-forget to remove latency bottlenecks!
+        update(ref(database, `sessions/${currentGamePin}`), { bossHp: increment(-10) }).catch(err => {
+            console.error("Boss attack failed:", err);
+        });
     });
 
-    setupPlayerReactionPipelines();
+    // Sandbox Controls Wiring
+    document.getElementById('btn-toggle-sandbox')?.addEventListener('click', toggleSandbox);
+    document.getElementById('btn-toggle-sandbox-lobby')?.addEventListener('click', toggleSandbox);
+    document.getElementById('btn-close-sandbox')?.addEventListener('click', closeSandbox);
+    document.getElementById('btn-minimize-sandbox')?.addEventListener('click', () => {
+        const panel = document.getElementById('sandbox-simulator-panel');
+        const btn = document.getElementById('btn-minimize-sandbox');
+        panel.classList.toggle('minimized');
+        btn.innerText = panel.classList.contains('minimized') ? '+' : '−';
+    });
 
-    document.querySelectorAll(".btn-player-sync").forEach(btn => {
-        btn.addEventListener("click", () => {
-            if (isFirebaseEnabled && currentSessionPin && myPlayerKey) {
-                bindPlayerSessionSyncPipeline();
-                const origText = btn.innerText;
-                btn.innerText = "Synced! ✓";
-                btn.style.color = "#22c55e";
-                setTimeout(() => {
-                    btn.innerText = origText;
-                    btn.style.color = "";
-                }, 1000);
-            }
+    // Sandbox Panel Simulation Actions
+    document.getElementById('btn-sandbox-bots')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}`));
+        const data = snap.val();
+        if (!data) return;
+        const botNames = ['Bot_Alpha', 'Bot_Bravo', 'Bot_Charlie'];
+        const existingNames = Object.values(data.players || {}).map(p => p.name);
+        let spawned = 0;
+        for (const name of botNames) {
+            if (existingNames.includes(name)) continue;
+            const botId = 'bot_' + generateId();
+            const botData = { name, score: Math.floor(Math.random() * 800), hasAnswered: false, lastAnswerCorrect: false, lastPointsEarned: 0, streak: Math.floor(Math.random() * 4), isBot: true };
+            if (data.teamMode) botData.team = TEAM_COLORS[Math.floor(Math.random() * (data.teamCount || 4))].key;
+            await set(ref(database, `sessions/${currentGamePin}/players/${botId}`), botData);
+            spawned++;
+        }
+        setSandboxStatus(spawned > 0 ? `¼️ ${spawned} bot(s) spawned in lobby!` : '¹️ Bots already exist.');
+    });
+
+    document.getElementById('btn-sandbox-autoanswer')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}`));
+        const data = snap.val();
+        if (!data || data.state !== 'question') return setSandboxStatus('⚠️ No active question. Start a question first.');
+        const bots = Object.entries(data.players || {}).filter(([, p]) => p.isBot && !p.hasAnswered);
+        if (bots.length === 0) return setSandboxStatus('⚠️ No bots found. Spawn bots first.');
+        const q = data.questions[data.currentQuestionIndex];
+        const updates = {};
+        for (const [botId, bot] of bots) {
+            const isCorrect = Math.random() < 0.65;
+            const timeElapsed = Math.random() * (q.timeLimit || 20);
+            const speedBonus = isCorrect ? Math.floor(Math.max(0, 500 * (1 - (timeElapsed / (q.timeLimit || 20))))) : 0;
+            let newStreak = isCorrect ? (bot.streak || 0) + 1 : 0;
+            let points = isCorrect ? 500 + speedBonus : 0;
+            if (isCorrect && newStreak >= 3) points = Math.floor(points * 1.2);
+            updates[`players/${botId}/hasAnswered`] = true;
+            updates[`players/${botId}/lastAnswerCorrect`] = isCorrect;
+            updates[`players/${botId}/lastPointsEarned`] = points;
+            updates[`players/${botId}/score`] = (bot.score || 0) + points;
+            updates[`players/${botId}/streak`] = newStreak;
+            updates['totalAnswers'] = increment(1);
+        }
+        await update(ref(database, `sessions/${currentGamePin}`), updates);
+        setSandboxStatus(`¼️ ${bots.length} bot(s) answered!`);
+    });
+
+    document.getElementById('btn-sandbox-teammode')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}`));
+        const data = snap.val();
+        if (!data) return;
+        const newTeamMode = !data.teamMode;
+        const sandboxTeamCount = Math.min(8, Math.max(2, data.teamCount || 4));
+        await update(ref(database, `sessions/${currentGamePin}`), { teamMode: newTeamMode, teamCount: sandboxTeamCount, teamAssign: 'auto', teamLabelMode: data.teamLabelMode || 'groups' });
+        if (newTeamMode && data.players) {
+            const playerKeys = Object.keys(data.players);
+            const teamUpdates = {};
+            playerKeys.forEach((key, idx) => {
+                teamUpdates[`players/${key}/team`] = TEAM_COLORS[idx % sandboxTeamCount].key;
+            });
+            await update(ref(database, `sessions/${currentGamePin}`), teamUpdates);
+        }
+        const btn = document.getElementById('btn-sandbox-teammode');
+        if (btn) btn.style.borderColor = newTeamMode ? '#22c55e' : '#4bc0c0';
+        setSandboxStatus(newTeamMode ? `Team mode ON — assigned across ${sandboxTeamCount} groups!` : 'Team mode OFF.');
+    });
+
+    document.getElementById('btn-sandbox-grantpowerup')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}/players`));
+        const players = snap.val() || {};
+        const simEntry = Object.entries(players).find(([, p]) => p.isSim || p.name === 'DemoPlayer');
+        if (!simEntry) return setSandboxStatus('⚠️ Sim player not found. Open sandbox iframe first.');
+        const [simId, simVal] = simEntry;
+        
+        const items = [
+            { type: 'shield', name: 'Defensive Shield', emoji: '🛡️' },
+            { type: 'blur', name: 'Foggy Window', emoji: '🌫️' },
+            { type: 'shuffle', name: 'Answer Shuffle', emoji: '🔀' },
+            { type: 'glitch', name: 'Glitch Out', emoji: '📺' },
+            { type: 'emoji_flood', name: 'Emoji Flood', emoji: '🎈' },
+            { type: 'redacted', name: 'Redacted Question', emoji: '🕵️' },
+            { type: 'steal', name: 'Point Steal', emoji: '💰' },
+            { type: 'freeze', name: 'Time Freeze', emoji: '⏳' },
+            { type: 'double_shield', name: 'Double Shield', emoji: '🛡️🛡️' },
+            { type: 'speed_boost', name: 'Speed Boost', emoji: '⚡' }
+        ];
+        const chosen = items[Math.floor(Math.random() * items.length)];
+        const curInv = Array.isArray(simVal.inventory) ? [...simVal.inventory] : [];
+        if (curInv.length >= 3) return setSandboxStatus('⚠️ Sim player inventory full.');
+        curInv.push(chosen);
+        await update(ref(database, `sessions/${currentGamePin}/players/${simId}`), { inventory: curInv });
+        setSandboxStatus(`¼️ Sim player got: ${chosen.emoji} ${chosen.name}!`);
+    });
+
+    document.getElementById('btn-sandbox-attack')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}/players`));
+        const players = snap.val() || {};
+        const targets = Object.entries(players).filter(([, p]) => p.isSim || p.isBot);
+        if (targets.length === 0) return setSandboxStatus('⚠️ No targets found.');
+        const [targetId, targetPlayer] = targets[Math.floor(Math.random() * targets.length)];
+        const attackTypes = ['blur', 'shuffle', 'glitch', 'emoji_flood', 'steal', 'freeze', 'redacted'];
+        const type = attackTypes[Math.floor(Math.random() * attackTypes.length)];
+        const attackRef = push(ref(database, `sessions/${currentGamePin}/attacks`));
+        await set(attackRef, { attackerId: 'sandbox_host', attackerName: '¼️ Host Demo', targetId, targetName: targetPlayer.name, type, timestamp: Date.now(), blocked: false });
+        setSandboxStatus(`¼️ ${type.toUpperCase()} attack launched on ${targetPlayer.name}!`);
+    });
+
+    document.getElementById('btn-sandbox-shield')?.addEventListener('click', async () => {
+        if (!currentGamePin) return setSandboxStatus('⚠️ No active game session.');
+        const snap = await get(ref(database, `sessions/${currentGamePin}/players`));
+        const players = snap.val() || {};
+        const bots = Object.entries(players).filter(([, p]) => p.isBot || p.isSim);
+        if (bots.length === 0) return setSandboxStatus('⚠️ No bots found.');
+        const [botId, botPlayer] = bots[0];
+        await update(ref(database, `sessions/${currentGamePin}/players/${botId}`), { shieldCount: 2, shieldActive: true });
+        setSandboxStatus(`🛡️ Double Shield given to ${botPlayer.name}.`);
+        setTimeout(async () => {
+            const attackRef = push(ref(database, `sessions/${currentGamePin}/attacks`));
+            await set(attackRef, { attackerId: 'sandbox_host', attackerName: '¼️ Host Demo', targetId: botId, targetName: botPlayer.name, type: 'blur', timestamp: Date.now(), blocked: false });
+        }, 1000);
+    });
+
+    // Draggable Control Interface Engine
+    (function initSandboxDrag() {
+        const handle = document.getElementById('sandbox-drag-handle');
+        const panel = document.getElementById('sandbox-simulator-panel');
+        if (!handle || !panel) return;
+        let isDragging = false, startX, startY, startLeft, startTop;
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('button')) return;
+            isDragging = true;
+            handle.setPointerCapture(e.pointerId);
+            const rect = panel.getBoundingClientRect();
+            startX = e.clientX; startY = e.clientY;
+            startLeft = rect.left; startTop = rect.top;
+            panel.style.left = rect.left + 'px'; panel.style.top = rect.top + 'px';
+            panel.style.right = 'auto'; panel.style.bottom = 'auto';
+            e.preventDefault();
         });
+        handle.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX, dy = e.clientY - startY;
+            panel.style.left = Math.max(0, Math.min(window.innerWidth - 100, startLeft + dx)) + 'px';
+            panel.style.top = Math.max(0, Math.min(window.innerHeight - 50, startTop + dy)) + 'px';
+        });
+        handle.addEventListener('pointerup', () => isDragging = false);
+        handle.addEventListener('pointercancel', () => isDragging = false);
+    })();
+
+    // Automation Simulator Deep Query Params Parser Route
+    (async () => {
+        const simParams = new URLSearchParams(window.location.search);
+        const simPin = simParams.get('pin');
+        const simMode = simParams.get('sim');
+        const simName = simParams.get('nickname') || 'DemoPlayer';
+
+        if (simMode === '1' && simPin) {
+            await new Promise(r => setTimeout(r, 800));
+            const sessionSnap = await get(ref(database, `sessions/${simPin}`));
+            if (!sessionSnap.exists()) return;
+            const data = sessionSnap.val();
+            if (data.state !== 'lobby') return;
+            const existingNames = Object.values(data.players || {}).map(p => p.name.toLowerCase());
+            if (existingNames.includes(simName.toLowerCase())) return;
+
+            document.getElementById('input-pin').value = simPin;
+            document.getElementById('input-nickname').value = simName;
+            document.getElementById('form-join').requestSubmit();
+        }
+    })();
+
+    // Host Keyboard Hotkeys
+    document.addEventListener('keydown', (e) => {
+        if (!hostId || myPlayerId !== hostId) return; // Only host can use hotkeys
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        
+        if (e.code === 'Space') {
+            e.preventDefault();
+            const nextBtn = document.getElementById('btn-next-question');
+            const startBtn = document.getElementById('btn-start-game');
+            const dashNextBtn = document.getElementById('btn-dash-next');
+            if (nextBtn && !nextBtn.classList.contains('hidden') && nextBtn.style.display !== 'none') nextBtn.click();
+            else if (startBtn && !startBtn.disabled && startBtn.style.display !== 'none') startBtn.click();
+            else if (dashNextBtn && !dashNextBtn.classList.contains('hidden') && dashNextBtn.style.display !== 'none') dashNextBtn.click();
+        }
+        else if (e.code === 'KeyE') {
+            e.preventDefault();
+            const endBtn = document.getElementById('btn-end-game-early');
+            const dashEndBtn = document.getElementById('btn-dash-end-game-early');
+            if (endBtn && endBtn.offsetParent !== null) endBtn.click();
+            else if (dashEndBtn && dashEndBtn.offsetParent !== null) dashEndBtn.click();
+        }
+        else if (e.code === 'KeyM') {
+            e.preventDefault();
+            const music = document.getElementById('bg-music');
+            if (music) {
+                music.muted = !music.muted;
+                showToast(music.muted ? '🔇 Music Muted' : '🔊 Music Unmuted');
+            }
+        }
     });
 }
 
-async function recoverPlayerSession() {
-    if (!isFirebaseEnabled || sessionStorage.getItem("powerbi_player_role") !== "player") return;
+// Global scope attachments for visual orchestration
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
+} else {
+    initApp();
+}
 
-    const savedPin = sessionStorage.getItem("powerbi_player_session_pin");
-    const savedNickname = sessionStorage.getItem("powerbi_player_nickname");
-    const savedPlayerKey = sessionStorage.getItem("powerbi_player_key");
-    if (!savedPin || !savedNickname || !savedPlayerKey) {
-        clearPlayerSessionStorage();
-        return;
-    }
-
+const urlParams = new URLSearchParams(window.location.search);
+if (!IS_SIMULATOR_CLIENT) {
     try {
-        const sessionSnap = await get(ref(database, `${SESSION_ROOT}/${savedPin}`));
-        const playerSnap = await get(ref(database, `${SESSION_ROOT}/${savedPin}/players/${savedPlayerKey}`));
-        const clientId = getOrCreatePlayerClientId();
-        if (!sessionSnap.exists() || !playerSnap.exists() || playerSnap.val().clientId !== clientId) {
-            clearPlayerSessionStorage();
-            return;
-        }
-
-        const reservation = await reserveNickname(savedPin, savedNickname, savedPlayerKey, clientId);
-        if (reservation.claim.playerKey !== savedPlayerKey) {
-            clearPlayerSessionStorage();
-            return;
-        }
-
-        currentSessionPin = savedPin;
-        myNickname = savedNickname;
-        myPlayerKey = savedPlayerKey;
-        currentRole = "player";
-        currentScore = playerSnap.val().score || 0;
-        currentStreak = playerSnap.val().streak || 0;
-
-        await update(ref(database, `${SESSION_ROOT}/${savedPin}/players/${savedPlayerKey}`), {
-            online: true,
-            presenceVersion: 2,
-            lastSeen: Date.now()
-        });
-        await configurePlayerPresence(savedPin, savedNickname, savedPlayerKey);
-        document.getElementById("display-player-name").innerText = myNickname;
-        updatePlayerPinDisplays();
-        bindPlayerSessionSyncPipeline();
-    } catch (err) {
-        console.warn("Player session recovery failed:", err);
-        clearPlayerSessionStorage();
-    }
+        const lastJoin = JSON.parse(localStorage.getItem('dashboard_wars_last_join') || 'null');
+        if (lastJoin?.pin) document.getElementById('input-pin').value = lastJoin.pin;
+        if (lastJoin?.nickname) document.getElementById('input-nickname').value = lastJoin.nickname;
+    } catch {}
+}
+if (urlParams.has('pin')) {
+    switchView('view-player-join');
+    const inputPin = document.getElementById('input-pin');
+    if (inputPin) inputPin.value = urlParams.get('pin');
 }
 
-
-async function recoverHostSession() {
-    const savedPin = sessionStorage.getItem("powerbi_host_session_pin");
-    const savedRole = sessionStorage.getItem("powerbi_host_role");
-    const savedQuiz = sessionStorage.getItem("powerbi_host_quiz");
-
-    if (savedPin && savedRole === "host" && savedQuiz) {
-        currentSessionPin = savedPin;
-        currentRole = "host";
-        currentQuizData = JSON.parse(savedQuiz);
-        gameSessionRef = ref(database, `${SESSION_ROOT}/${currentSessionPin}`);
-
-        try {
-            const snap = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}`));
-            if (!snap.exists()) {
-                purgeActiveListeners();
-                enterHostDashboard();
-                return;
-            }
-            const session = snap.val();
-            hostActiveQuestionIndex = session.currentQuestion !== undefined ? session.currentQuestion : 0;
-
-            document.getElementById("display-game-pin").innerText = currentSessionPin;
-            updateHostPinDisplays();
-            document.getElementById("display-join-url").innerHTML = `Join at <strong>${window.location.origin}</strong>`;
-            const qrContainer = document.getElementById("qr-code-container");
-            if (qrContainer) {
-                qrContainer.innerHTML = "";
-                new QRCode(qrContainer, {
-                    text: `${window.location.origin}?pin=${currentSessionPin}`,
-                    width: 160, height: 160, colorDark: "#2B2B2B", colorLight: "#FFFFFF"
-                });
-            }
-
-            if (session.status === "lobby") {
-                trackLobbyRegistrations();
-                switchView("hostLobby");
-            } else if (session.status === "question") {
-                await executeQuestionBroadcast(true);
-            } else if (session.status === "results") {
-                concludeQuestionEvaluation();
-            } else if (session.status === "gameover") {
-                purgeActiveListeners();
-                enterHostDashboard();
-            } else {
-                presentHostLeaderboardView();
-            }
-            console.log("Restored host session from sessionStorage for PIN:", currentSessionPin);
-        } catch (err) {
-            console.error("Error recovering host session:", err);
-            enterHostDashboard();
-        }
-    }
-}
-
-function updatePlayerPinDisplays() {
-    document.querySelectorAll(".display-player-pin").forEach(el => {
-        el.innerText = currentSessionPin || "---";
-    });
-}
-
-
-function updateHostPinDisplays() {
-    document.querySelectorAll(".display-host-pin").forEach(el => {
-        el.innerText = currentSessionPin || "---";
-    });
-}
-
-function handlePlayerSessionExit(message) {
-    if (currentRole !== "player") return;
-    currentRole = null;
-    playerConnectionId = null;
-    unsubscribeActiveListeners();
-    clearPlayerSessionStorage();
-    alert(message);
-    switchView("landing");
-}
-
-function bindPlayerSessionSyncPipeline() {
-    if (!currentSessionPin || !myPlayerKey) return;
-    updatePlayerPinDisplays();
-    if (sessionStateListener) sessionStateListener();
-    if (playerRecordListener) playerRecordListener();
-
-    playerRecordListener = onValue(
-        ref(database, `${SESSION_ROOT}/${currentSessionPin}/players/${myPlayerKey}`),
-        async snapshot => {
-            if (!snapshot.exists()) {
-                const roomSnapshot = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}`));
-                handlePlayerSessionExit(
-                    roomSnapshot.exists()
-                        ? "You have been removed from the session."
-                        : "The host has ended this game session."
-                );
-                return;
-            }
-            const player = snapshot.val();
-            currentScore = player.score || 0;
-            currentStreak = player.streak || 0;
-            const scoreDisplay = document.getElementById("player-score-display");
-            if (scoreDisplay) scoreDisplay.innerText = currentScore;
-        }
-    );
-
-    sessionStateListener = onValue(
-        ref(database, `${SESSION_ROOT}/${currentSessionPin}/publicState`),
-        snapshot => {
+async function recoverStoredHostSession() {
+    if (IS_SIMULATOR_CLIENT || urlParams.has('pin')) return;
+    const raw = sessionStorage.getItem('dashboard_wars_host_session');
+    if (!raw || !isFirebaseEnabled) return;
+    try {
+        const saved = JSON.parse(raw);
+        const snapshot = await get(ref(database, `sessions/${saved.pin}`));
         if (!snapshot.exists()) {
-            handlePlayerSessionExit("The host has ended this game session.");
+            sessionStorage.removeItem('dashboard_wars_host_session');
             return;
         }
         const session = snapshot.val();
-
-        switch (session.status) {
-            case "lobby": switchView("playerLobby"); break;
-            case "question": preparePlayerInputInterface(session); break;
-            case "results": renderPlayerResultPanel(session); break;
-            case "gameover": listUIFinalLeaderboard(session); break;
+        isHost = true;
+        currentGamePin = saved.pin;
+        questions = session.questions || saved.questions || [];
+        currentGameMode = session.mode || saved.mode || 'classic';
+        currentHostedQuizTitle = saved.title || 'Recovered Session';
+        currentQuestionIndex = session.currentQuestionIndex || 0;
+        currentGameState = session.state;
+        sessionStorage.removeItem('dashboard_wars_player_session');
+        document.getElementById('display-game-pin').innerText = currentGamePin;
+        document.getElementById('display-join-url').innerHTML = `Join at <strong>${window.location.host}</strong> with PIN:`;
+        const qrContainer = document.getElementById('qr-code-container');
+        if (qrContainer) {
+            qrContainer.innerHTML = '';
+            new QRCode(qrContainer, { text: `${window.location.origin}${window.location.pathname}?pin=${currentGamePin}`, width: 160, height: 160 });
         }
-    });
-}
 
-function preparePlayerInputInterface(session) {
-    const sessionQIndex = session.currentQuestion !== undefined ? session.currentQuestion : 0;
-    if (playerActiveQuestionIndex !== sessionQIndex) {
-        playerActiveQuestionIndex = sessionQIndex;
-        hasAnsweredCurrent = false;
-    } else {
-        if (hasAnsweredCurrent) return;
-    }
-    currentQuestionStartTime = session.questionStartTime || Date.now();
+        onValue(ref(database, `sessions/${currentGamePin}/totalAnswers`), async answerSnapshot => {
+            const total = answerSnapshot.val() || 0;
+            document.getElementById('answers-count').innerText = `${total} Answers`;
+            const dashCount = document.getElementById('dash-answers-count');
+            if (dashCount) dashCount.innerText = `${total} Answers`;
+        });
 
-    document.getElementById("player-score-display").innerText = currentScore;
-    document.getElementById("player-waiting-msg").classList.add("hidden");
-
-    const pNumber = document.getElementById("player-question-number");
-    if(pNumber) {
-        pNumber.innerText = `Question ${(session.currentQuestion || 0) + 1} of ${session.totalQuestions || "?"}`;
-    }
-
-    const mobileQuestionText = document.getElementById("player-question-text-mobile");
-    if (mobileQuestionText) mobileQuestionText.textContent = session.questionText || "Question";
-    const mobileImageContainer = document.getElementById("player-question-image-mobile-container");
-    const mobileImage = document.getElementById("player-question-image-mobile");
-    if (mobileImageContainer && mobileImage) {
-        if (session.questionImage) {
-            mobileImage.src = session.questionImage;
-            mobileImageContainer.classList.remove("hidden");
+        if (session.state === 'question') {
+            const q = questions[currentQuestionIndex];
+            if (q?.dashboardData) startDashboardQuestion(currentQuestionIndex, session);
+            else startQuestion(currentQuestionIndex, session);
+        } else if (session.state === 'results' || session.state === 'results_dash') {
+            if (questions[currentQuestionIndex]?.dashboardData) showDashboardResults();
+            else showHostResults();
+        } else if (session.state === 'leaderboard' || session.state === 'game_over') {
+            showHostLeaderboard();
         } else {
-            mobileImage.src = "";
-            mobileImageContainer.classList.add("hidden");
-        }
-    }
-    
-    if(window.potentialPointsInterval) clearInterval(window.potentialPointsInterval);
-    const potentialPointsEl = document.getElementById("player-potential-points");
-    if(potentialPointsEl) {
-        potentialPointsEl.innerText = "1000";
-        if(session.questionType !== "poll") {
-            const durationLimit = (session.timeLimit || 20) * 1000;
-            window.potentialPointsInterval = setInterval(() => {
-                if(hasAnsweredCurrent) {
-                    clearInterval(window.potentialPointsInterval);
-                    return;
-                }
-                const elapsed = Date.now() - currentQuestionStartTime;
-                const scale = Math.max(0.2, 1 - (elapsed / durationLimit));
-                potentialPointsEl.innerText = Math.round(1000 * scale);
-            }, 100);
-        } else {
-            potentialPointsEl.innerText = "0";
-        }
-    }
-
-    const qType = session.questionType || "multiple-choice";
-    
-    document.getElementById("player-input-mc").classList.add("hidden");
-    document.getElementById("player-input-tf").classList.add("hidden");
-    document.getElementById("player-input-jumbled").classList.add("hidden");
-    document.getElementById("player-input-text").classList.add("hidden");
-    document.getElementById("player-input-number").classList.add("hidden");
-    document.getElementById("player-input-poll").classList.add("hidden");
-    document.getElementById("player-input-speedmath").classList.add("hidden");
-
-    switchView("playerQuestion");
-
-    if (qType === "multiple-choice") {
-        document.getElementById("player-input-mc").classList.remove("hidden");
-        const btns = document.getElementById("player-input-mc").querySelectorAll(".answer-btn");
-        const options = session.questionOptions || [];
-        btns.forEach((btn, index) => {
-            btn.classList.remove("selected", "disabled-answer", "hidden");
-            btn.disabled = false;
-            const label = btn.querySelector(".answer-label");
-            if (label) label.textContent = options[index] || `Option ${String.fromCharCode(65 + index)}`;
-            if (index >= options.length) btn.classList.add("hidden");
-        });
-        btns.forEach(btn => {
-            btn.onclick = async (e) => {
-                const chosenIdx = parseInt(e.currentTarget.getAttribute("data-index"));
-                hasAnsweredCurrent = true;
-                btns.forEach(b => { b.disabled = true; if (b !== e.currentTarget) b.classList.add("disabled-answer"); });
-                e.currentTarget.classList.add("selected");
-                if (isFirebaseEnabled && myPlayerKey) {
-                    await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, optionIndex: chosenIdx, elapsedTime: Date.now() - currentQuestionStartTime });
-                    document.getElementById("player-waiting-msg").classList.remove("hidden");
-                }
-            };
-        });
-    } else if (qType === "true-false") {
-        document.getElementById("player-input-tf").classList.remove("hidden");
-        const btns = document.getElementById("player-input-tf").querySelectorAll(".answer-btn");
-        btns.forEach(btn => { btn.classList.remove("selected", "disabled-answer"); btn.disabled = false; });
-        btns.forEach(btn => {
-            btn.onclick = async (e) => {
-                const chosenIdx = parseInt(e.currentTarget.getAttribute("data-index"));
-                hasAnsweredCurrent = true;
-                btns.forEach(b => { b.disabled = true; if (b !== e.currentTarget) b.classList.add("disabled-answer"); });
-                e.currentTarget.classList.add("selected");
-                if (isFirebaseEnabled && myPlayerKey) {
-                    await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, optionIndex: chosenIdx, elapsedTime: Date.now() - currentQuestionStartTime });
-                    document.getElementById("player-waiting-msg").classList.remove("hidden");
-                }
-            };
-        });
-    } else if (qType === "jumbled-prompt") {
-        document.getElementById("player-input-jumbled").classList.remove("hidden");
-        renderPlayerJumbledPrompt(session.questionWords);
-    } else if (qType === "type-answer") {
-        document.getElementById("player-input-text").classList.remove("hidden");
-        const inputEl = document.getElementById("input-type-answer");
-        const submitBtn = document.getElementById("btn-submit-type-answer");
-        inputEl.value = "";
-        inputEl.disabled = false;
-        submitBtn.disabled = false;
-        
-        submitBtn.onclick = async () => {
-            if (hasAnsweredCurrent) return;
-            const typedAns = inputEl.value.trim();
-            if (!typedAns) return;
-            
-            hasAnsweredCurrent = true;
-            inputEl.disabled = true;
-            submitBtn.disabled = true;
-            if (isFirebaseEnabled && myPlayerKey) {
-                await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, textAnswer: typedAns, elapsedTime: Date.now() - currentQuestionStartTime });
-                document.getElementById("player-waiting-msg").classList.remove("hidden");
-            }
-        };
-    } else if (qType === "number-guess") {
-        document.getElementById("player-input-number").classList.remove("hidden");
-        const rangeEl = document.getElementById("input-number-guess");
-        const displayEl = document.getElementById("display-number-guess");
-        const submitBtn = document.getElementById("btn-submit-number-guess");
-        
-        rangeEl.value = 50;
-        displayEl.innerText = 50;
-        rangeEl.disabled = false;
-        submitBtn.disabled = false;
-        
-        rangeEl.oninput = (e) => {
-            displayEl.innerText = e.target.value;
-        };
-        
-        submitBtn.onclick = async () => {
-            if (hasAnsweredCurrent) return;
-            hasAnsweredCurrent = true;
-            rangeEl.disabled = true;
-            submitBtn.disabled = true;
-            if (isFirebaseEnabled && myPlayerKey) {
-                await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, numberAnswer: parseFloat(rangeEl.value), elapsedTime: Date.now() - currentQuestionStartTime });
-                document.getElementById("player-waiting-msg").classList.remove("hidden");
-            }
-        };
-    } else if (qType === "poll") {
-        document.getElementById("player-input-poll").classList.remove("hidden");
-        const pollContainer = document.getElementById("player-poll-options");
-        pollContainer.innerHTML = "";
-        const options = session.questionOptions || [];
-        options.forEach((opt, idx) => {
-            const btn = document.createElement("button");
-            btn.className = "btn btn-secondary w-full text-left flex items-center gap-3";
-            btn.style.fontSize = "1.1rem";
-            btn.style.padding = "0.75rem 1.25rem";
-            btn.style.marginBottom = "0.5rem";
-            btn.innerHTML = `<span style="font-weight:bold; color:var(--color-cyan)">${String.fromCharCode(65 + idx)}</span> <span>${opt}</span>`;
-            btn.onclick = async () => {
-                if (hasAnsweredCurrent) return;
-                hasAnsweredCurrent = true;
-                const btns = pollContainer.querySelectorAll("button");
-                btns.forEach(b => {
-                    b.disabled = true;
-                    if (b !== btn) b.style.opacity = "0.5";
+            switchView('view-host-lobby');
+            onValue(ref(database, `sessions/${currentGamePin}/players`), playersSnapshot => {
+                const players = playersSnapshot.val() || {};
+                const entries = Object.values(players).filter(player => player.online !== false);
+                document.getElementById('player-count').innerText = entries.length;
+                const list = document.getElementById('player-list');
+                list.innerHTML = '';
+                entries.forEach(player => {
+                    const tag = document.createElement('div');
+                    tag.className = 'player-tag';
+                    tag.textContent = player.name;
+                    list.appendChild(tag);
                 });
-                btn.style.borderColor = "var(--color-cyan)";
-                if (isFirebaseEnabled && myPlayerKey) {
-                    await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, optionIndex: idx, elapsedTime: Date.now() - currentQuestionStartTime });
-                    document.getElementById("player-waiting-msg").classList.remove("hidden");
-                }
-            };
-            pollContainer.appendChild(btn);
-        });
-    } else if (qType === "speed-math") {
-        document.getElementById("player-input-speedmath").classList.remove("hidden");
-        const inputEl = document.getElementById("input-speedmath-answer");
-        const submitBtn = document.getElementById("btn-submit-speedmath");
-        const requirementsEl = document.getElementById("player-math-equation");
-        inputEl.value = "";
-        inputEl.disabled = false;
-        submitBtn.disabled = false;
-        if (requirementsEl) requirementsEl.innerText = `Required elements: ${session.questionEquation || "Use the appropriate DAX expression"}`;
-        
-        submitBtn.onclick = async () => {
-            if (hasAnsweredCurrent) return;
-            const val = inputEl.value.trim();
-            if (!val) return;
-            hasAnsweredCurrent = true;
-            inputEl.disabled = true;
-            submitBtn.disabled = true;
-            if (isFirebaseEnabled && myPlayerKey) {
-                await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, textAnswer: val, elapsedTime: Date.now() - currentQuestionStartTime });
-                document.getElementById("player-waiting-msg").classList.remove("hidden");
-            }
-        };
-    }
-}
-
-function renderPlayerJumbledPrompt(words) {
-    const availableContainer = document.getElementById("player-jumbled-available");
-    const constructedContainer = document.getElementById("player-jumbled-constructed");
-    
-    availableContainer.innerHTML = "";
-    constructedContainer.innerHTML = "";
-    
-    let constructedSequence = [];
-    const scrambled = [...words].sort(() => Math.random() - 0.5);
-    
-    const checkSubmission = async () => {
-        if (constructedSequence.length === words.length) {
-            hasAnsweredCurrent = true;
-            const chips = document.querySelectorAll(".player-jumbled-chip");
-            chips.forEach(c => c.style.pointerEvents = "none");
-            if (isFirebaseEnabled && myPlayerKey) {
-                await set(ref(database, `${SESSION_ROOT}/${currentSessionPin}/answers/${myPlayerKey}`), { questionIndex: playerActiveQuestionIndex, sequence: constructedSequence, elapsedTime: Date.now() - currentQuestionStartTime });
-                document.getElementById("player-waiting-msg").classList.remove("hidden");
-            }
-        }
-    };
-
-    scrambled.forEach((w, index) => {
-        const chip = document.createElement("div");
-        chip.className = "player-jumbled-chip";
-        chip.innerText = w;
-        chip.onclick = () => {
-            if (hasAnsweredCurrent) return;
-            chip.remove();
-            constructedContainer.appendChild(chip);
-            constructedSequence.push(w);
-            chip.onclick = () => {
-                if (hasAnsweredCurrent) return;
-                chip.remove();
-                availableContainer.appendChild(chip);
-                constructedSequence = constructedSequence.filter(item => item !== w);
-                chip.onclick = () => {
-                    if (hasAnsweredCurrent) return;
-                    chip.remove();
-                    constructedContainer.appendChild(chip);
-                    constructedSequence.push(w);
-                    checkSubmission();
-                };
-            };
-            checkSubmission();
-        };
-        availableContainer.appendChild(chip);
-    });
-}
-
-async function renderPlayerResultPanel(session) {
-    hasAnsweredCurrent = false;
-    if (!isFirebaseEnabled || !myPlayerKey) { switchView("playerResult"); return; }
-
-    try {
-        const pSnap = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players/${myPlayerKey}`));
-        const allPlayersSnap = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players`));
-        if (!pSnap.exists() || !allPlayersSnap.exists()) return;
-
-        const pData = pSnap.val();
-        currentScore = pData.score;
-        currentStreak = pData.streak;
-
-        const titleUI = document.getElementById("player-result-title");
-        const panel = document.getElementById("player-result-panel");
-        const pointsBadge = document.getElementById("player-points-earned");
-        const streakMsg = document.getElementById("player-result-streak-msg");
-        const correctAnswer = document.getElementById("player-correct-answer");
-        const correctAnswerLabel = document.getElementById("player-correct-answer-label");
-        const correctAnswerText = document.getElementById("player-correct-answer-text");
-
-        panel.classList.remove("result-correct", "result-incorrect");
-
-        const qType = session.questionType || "multiple-choice";
-        if (qType === "poll") {
-            titleUI.innerText = "Opinion Recorded! 📊";
-            panel.classList.add("result-correct");
-            pointsBadge.innerText = "0";
-        } else {
-            if (pData.wasCorrect) {
-                titleUI.innerText = qType === "speed-math" ? "DAX Accepted! ✓" : "Correct!";
-                panel.classList.add("result-correct");
-                pointsBadge.innerText = pData.lastPointsEarned;
-                try { sfx.powerup.play(); } catch (e) { }
-            } else {
-                titleUI.innerText = qType === "speed-math" ? "Missing Required DAX ✕" : "Not quite.";
-                panel.classList.add("result-incorrect");
-                pointsBadge.innerText = "0";
-            }
-        }
-
-        if (correctAnswer && correctAnswerLabel && correctAnswerText && session.resultAnswer) {
-            correctAnswerLabel.textContent = qType === "poll" ? "Poll result" : "Correct answer";
-            correctAnswerText.textContent = session.resultAnswer;
-            correctAnswer.classList.remove("hidden");
-        } else if (correctAnswer) {
-            correctAnswer.classList.add("hidden");
-        }
-
-        if (currentStreak >= 3) {
-            streakMsg.classList.remove("hidden");
-            document.getElementById("player-streak-badge").classList.remove("hidden");
-            document.getElementById("player-streak-count").innerText = currentStreak;
-        } else {
-            streakMsg.classList.add("hidden");
-            if (currentStreak === 0) document.getElementById("player-streak-badge").classList.add("hidden");
-        }
-
-        const sortedPool = Object.entries(allPlayersSnap.val()).map(([k, v]) => ({ key: k, score: v.score })).sort((a, b) => b.score - a.score);
-        const currentRank = sortedPool.findIndex(item => item.key === myPlayerKey) + 1;
-
-        document.getElementById("player-rank-number").innerText = currentRank;
-        document.getElementById("player-rank-total").innerText = sortedPool.length;
-        document.getElementById("player-total-score").innerText = currentScore;
-
-        const movementUI = document.getElementById("player-rank-movement");
-        movementUI.classList.remove("up", "down", "same");
-
-        if (previousRank === null || currentRank === previousRank) {
-            movementUI.innerText = "— Stable"; movementUI.classList.add("same");
-        } else if (currentRank < previousRank) {
-            movementUI.innerText = `▲ Up ${previousRank - currentRank} Position(s)`; movementUI.classList.add("up");
-        } else {
-            movementUI.innerText = `▼ Down ${currentRank - previousRank} Position(s)`; movementUI.classList.add("down");
-        }
-
-        previousRank = currentRank;
-        switchView("playerResult");
-    } catch (err) { console.error(err); }
-}
-
-async function listUIFinalLeaderboard(session) {
-    document.getElementById("player-lb-msg").innerText = "Match concluded! Final Standings:";
-    switchView("playerLeaderboard");
-    
-    if (!isFirebaseEnabled) return;
-    try {
-        const playersSnapshot = await get(ref(database, `${SESSION_ROOT}/${currentSessionPin}/players`));
-        const listUI = document.getElementById("player-lb-list");
-        listUI.innerHTML = "";
-        
-        if (playersSnapshot.exists()) {
-            const array = Object.entries(playersSnapshot.val()).map(([key, val]) => ({ key, ...val }));
-            array.sort((a, b) => b.score - a.score);
-            
-            const myIndex = array.findIndex(p => p.key === myPlayerKey);
-            
-            let displaySet = new Set();
-            for(let i=0; i<3 && i<array.length; i++) displaySet.add(i);
-            
-            if(myIndex !== -1) {
-                if(myIndex - 1 >= 0) displaySet.add(myIndex - 1);
-                displaySet.add(myIndex);
-                if(myIndex + 1 < array.length) displaySet.add(myIndex + 1);
-            }
-            
-            let sortedIndices = Array.from(displaySet).sort((a,b) => a-b);
-            let lastIdx = -1;
-            
-            sortedIndices.forEach(idx => {
-                if(lastIdx !== -1 && idx > lastIdx + 1) {
-                    const dots = document.createElement("div");
-                    dots.className = "text-muted text-center my-2";
-                    dots.innerText = "• • •";
-                    listUI.appendChild(dots);
-                }
-                
-                const player = array[idx];
-                const row = document.createElement("div");
-                row.className = "leaderboard-row fade-in-up";
-                if (player.key === myPlayerKey) {
-                    row.style.background = "rgba(242, 200, 17, 0.16)";
-                    row.style.border = "1px solid var(--color-cyan)";
-                }
-                const name = document.createElement("span");
-                const score = document.createElement("span");
-                name.textContent = `#${idx + 1} ${player.nickname}`;
-                score.textContent = `${player.score} pts`;
-                row.append(name, score);
-                listUI.appendChild(row);
-                
-                lastIdx = idx;
+                document.getElementById('btn-start-game').disabled = entries.length === 0;
             });
         }
-    } catch(err) {
-        console.error(err);
+        showToast('Host session recovered.', '#2563eb');
+    } catch (error) {
+        console.error('Host recovery failed:', error);
     }
 }
 
-// ==========================================
-// 7. MULTICAST RX EMISSIONS
-// ==========================================
-function setupPlayerReactionPipelines() {
-    const triggerInboundReaction = async (emojiChar) => {
-        if (emojiCooldownActive || !currentSessionPin) return;
-        emojiCooldownActive = true;
-        const targetButtons = document.querySelectorAll(".btn-emoji");
-        targetButtons.forEach(b => b.classList.add("on-cooldown"));
+setTimeout(recoverStoredHostSession, 250);
 
-        if (isFirebaseEnabled) {
-            await set(push(ref(database, `${SESSION_ROOT}/${currentSessionPin}/reactions`)), { emoji: emojiChar, origin: myNickname, timestamp: Date.now() });
+setTimeout(async () => {
+    if (IS_SIMULATOR_CLIENT || urlParams.has('pin') || sessionStorage.getItem('dashboard_wars_host_session')) return;
+    const raw = sessionStorage.getItem('dashboard_wars_player_session');
+    if (!raw || !isFirebaseEnabled) return;
+    try {
+        const saved = JSON.parse(raw);
+        const room = await get(ref(database, `sessions/${saved.pin}`));
+        const player = await get(ref(database, `sessions/${saved.pin}/players/${saved.playerId}`));
+        if (!room.exists() || !player.exists() || player.val().deviceId !== getPlayerDeviceId()) {
+            sessionStorage.removeItem('dashboard_wars_player_session');
+            return;
         }
-        setTimeout(() => {
-            emojiCooldownActive = false;
-            targetButtons.forEach(b => b.classList.remove("on-cooldown"));
-        }, 800);
-    };
-
-    document.querySelectorAll(".btn-emoji").forEach(btn => {
-        btn.addEventListener("click", (e) => triggerInboundReaction(e.currentTarget.getAttribute("data-emoji")));
-    });
-}
-
-function spawnReactionOnHostScreen(emojiChar) {
-    let container = document.getElementById("host-lobby-emoji-container");
-    if (views.hostLeaderboard.classList.contains("active")) container = document.getElementById("host-emoji-container");
-    if (!container) return;
-
-    const el = document.createElement("div");
-    el.className = "floating-emoji";
-    el.innerText = emojiChar;
-    el.style.left = `${Math.random() * 85 + 5}%`;
-    container.appendChild(el);
-    el.addEventListener("animationend", () => el.remove());
-}
-
-// ==========================================
-// 8. PREVIEW MODAL ENGINE
-// ==========================================
-function compileQuestionFromBlock(block) {
-    const qType = block.getAttribute("data-qtype");
-    const qText = (block.querySelector(".maker-q-text")?.value || "").trim() || "Example Question?";
-    const qTime = parseInt(block.querySelector(".maker-q-time")?.value) || 20;
-    const qImage = block.getAttribute("data-image") || "";
-    const qObj = { type: qType, text: qText, timeLimit: qTime, image: qImage };
-
-    if (qType === "multiple-choice") {
-        const opts = Array.from(block.querySelectorAll(".maker-q-opt")).map(i => i.value.trim());
-        const checkedRadio = block.querySelector(".maker-q-correct:checked");
-        const correctIdx = checkedRadio ? parseInt(checkedRadio.value) : 0;
-        qObj.options = opts.map((o, i) => o || `Option ${i+1}`);
-        qObj.correct = correctIdx;
-    } else if (qType === "true-false") {
-        const checkedRadio = block.querySelector(".maker-q-correct:checked");
-        qObj.options = ["True", "False"];
-        qObj.correct = checkedRadio ? parseInt(checkedRadio.value) : 0;
-    } else if (qType === "jumbled-prompt") {
-        const words = (block.querySelector(".maker-q-words")?.value || "").split(",").map(w => w.trim()).filter(w => w);
-        qObj.words = words.length > 0 ? words : ["Example", "jumbled", "prompt"];
-    } else if (qType === "type-answer") {
-        qObj.answerText = block.querySelector(".maker-q-answer")?.value.trim() || "Answer";
-    } else if (qType === "number-guess") {
-        qObj.targetNumber = parseFloat(block.querySelector(".maker-q-number")?.value) || 50;
-    } else if (qType === "poll") {
-        const opts = (block.querySelector(".maker-q-poll-opts")?.value || "").split(",").map(o => o.trim()).filter(o => o);
-        qObj.options = opts.length > 0 ? opts : ["Option A", "Option B"]; qObj.isPoll = true;
-    } else if (qType === "speed-math") {
-        qObj.equation = block.querySelector(".maker-q-math-eq")?.value.trim() || "Range, Value"; 
+        switchView('view-player-join');
+        document.getElementById('input-pin').value = saved.pin;
+        document.getElementById('input-nickname').value = saved.nickname;
+        document.getElementById('form-join').requestSubmit();
+    } catch {
+        sessionStorage.removeItem('dashboard_wars_player_session');
     }
-    return qObj;
-}
+}, 350);
 
-let previewQuestions = [];
-let currentPreviewIndex = 0;
-
-function showPreviewModal(questions, startIndex = 0) {
-    previewQuestions = questions;
-    currentPreviewIndex = startIndex;
-    renderPreviewQuestion();
-    document.getElementById("preview-modal").classList.remove("hidden");
-}
-
-function renderPreviewQuestion() {
-    const q = previewQuestions[currentPreviewIndex];
-    if (!q) return;
-
-    document.getElementById("preview-question-text").innerText = q.text;
-    document.getElementById("preview-timer").innerText = q.timeLimit;
-    
-    const imgContainer = document.getElementById("preview-question-image-container");
-    const imgEl = document.getElementById("preview-question-image");
-    if (q.image) {
-        imgEl.src = q.image;
-        imgContainer.classList.remove("hidden");
-    } else {
-        imgEl.src = "";
-        imgContainer.classList.add("hidden");
-    }
-    
-    const mc = document.getElementById("preview-ans-mc");
-    const tf = document.getElementById("preview-ans-tf");
-    const jumbled = document.getElementById("preview-ans-jumbled");
-    const text = document.getElementById("preview-ans-text");
-    const number = document.getElementById("preview-ans-number");
-    const poll = document.getElementById("preview-ans-poll");
-    const speedmath = document.getElementById("preview-ans-speedmath");
-    
-    if(mc) mc.classList.add("hidden"); if(tf) tf.classList.add("hidden");
-    if(jumbled) jumbled.classList.add("hidden"); if(text) text.classList.add("hidden");
-    if(number) number.classList.add("hidden"); if(poll) poll.classList.add("hidden"); if(speedmath) speedmath.classList.add("hidden");
-
-    if (!q.type || q.type === "multiple-choice") {
-        if(mc) mc.classList.remove("hidden");
-        document.getElementById("preview-ans-0").innerText = q.options[0] || "";
-        document.getElementById("preview-ans-1").innerText = q.options[1] || "";
-        document.getElementById("preview-ans-2").innerText = q.options[2] || "";
-        document.getElementById("preview-ans-3").innerText = q.options[3] || "";
-    } else if (q.type === "true-false") {
-        if(tf) tf.classList.remove("hidden");
-        document.getElementById("preview-ans-tf-0").innerText = q.options[0] || "True";
-        document.getElementById("preview-ans-tf-1").innerText = q.options[1] || "False";
-    } else if (q.type === "jumbled-prompt") {
-        if(jumbled) jumbled.classList.remove("hidden");
-        const container = document.getElementById("preview-jumbled-words");
-        if(container) {
-            container.innerHTML = "";
-            const scrambled = [...q.words].sort(() => Math.random() - 0.5);
-            scrambled.forEach(w => {
-                const span = document.createElement("span"); span.className = "jumbled-word-chip"; span.innerText = w;
-                container.appendChild(span);
-            });
-        }
-    } else if (q.type === "type-answer") {
-        if(text) text.classList.remove("hidden");
-    } else if (q.type === "number-guess") {
-        if(number) number.classList.remove("hidden");
-    } else if (q.type === "poll") {
-        if(poll) poll.classList.remove("hidden");
-    } else if (q.type === "speed-math") {
-        if(speedmath) speedmath.classList.remove("hidden");
-        const eqDisp = document.getElementById("preview-math-equation-display");
-        if(eqDisp) eqDisp.innerText = `Required: ${q.equation || "?"}`;
-    }
-
-    const nav = document.getElementById("preview-nav-controls");
-    if (previewQuestions.length > 1) {
-        nav.classList.remove("hidden");
-        document.getElementById("preview-counter").innerText = `${currentPreviewIndex + 1} / ${previewQuestions.length}`;
-        document.getElementById("btn-preview-prev").disabled = currentPreviewIndex === 0;
-        document.getElementById("btn-preview-next").disabled = currentPreviewIndex === previewQuestions.length - 1;
-    } else {
-        nav.classList.add("hidden");
-    }
-}
-
-// Attach modal event listeners directly (module is deferred, DOM is ready)
-document.getElementById("btn-close-preview")?.addEventListener("click", () => {
-    document.getElementById("preview-modal").classList.add("hidden");
-});
-document.getElementById("btn-preview-prev")?.addEventListener("click", () => {
-    if (currentPreviewIndex > 0) { currentPreviewIndex--; renderPreviewQuestion(); }
-});
-document.getElementById("btn-preview-next")?.addEventListener("click", () => {
-    if (currentPreviewIndex < previewQuestions.length - 1) { currentPreviewIndex++; renderPreviewQuestion(); }
-});
+// Bypassing ESM boundary structures safely
+window.startCustomQuiz = startCustomQuiz;
