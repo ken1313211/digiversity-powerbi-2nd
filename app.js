@@ -47,10 +47,10 @@ try {
 }
 
 const THEME_COLORS = {
-    primary: "#F2C811",
-    purple: "#8A6D00",
-    blue: "#5B8DEF",
-    darkBlue: "#2B2B2B"
+    primary: "#FFE600",
+    purple: "#62626E",
+    blue: "#464650",
+    darkBlue: "#34343F"
 };
 
 const DEFAULT_APP_TITLE = "Digiversity 2026 Power BI";
@@ -94,6 +94,7 @@ let previousRank = null;
 let playerClientId = null;
 let playerConnectionId = null;
 let questionConclusionInProgress = false;
+let roomCreationInProgress = false;
 
 // Synchronization handles
 let sessionStateListener = null;
@@ -326,7 +327,7 @@ function initializeBrandingSettings() {
 // QUESTION MAKER - PREMIUM BUILDER SYSTEM
 // ============================================
 const GAME_TYPE_META = {
-    "multiple-choice": { label: "Visual Match", icon: "📊", color: "#F2C811" },
+    "multiple-choice": { label: "Visual Match", icon: "📊", color: "#FFE600" },
     "true-false":      { label: "BI Verdict", icon: "✅", color: "#8A6D00" },
     "jumbled-prompt":  { label: "Process Order", icon: "🔀", color: "#5B8DEF" },
     "type-answer":     { label: "DAX Answer", icon: "ƒx", color: "#a855f7" },
@@ -896,16 +897,38 @@ async function enterHostDashboard() {
     }
 }
 
+// Keep the familiar vertical library as the default; remember each browser's choice.
+let quizLibraryLayout = "list";
+try {
+    if (localStorage.getItem("powerbi_quiz_library_layout") === "grid") quizLibraryLayout = "grid";
+} catch (_) {}
+
+function applyQuizLibraryLayout(layout) {
+    quizLibraryLayout = layout === "grid" ? "grid" : "list";
+    document.getElementById("custom-quizzes-list")?.classList.toggle("quiz-list-view", quizLibraryLayout === "list");
+    document.getElementById("btn-quiz-view-list")?.setAttribute("aria-pressed", String(quizLibraryLayout === "list"));
+    document.getElementById("btn-quiz-view-grid")?.setAttribute("aria-pressed", String(quizLibraryLayout === "grid"));
+}
+
 function renderQuizSelector() {
     const listContainer = document.getElementById("custom-quizzes-list");
     if (!listContainer) return;
+    applyQuizLibraryLayout(quizLibraryLayout);
+    for (const layout of ["list", "grid"]) {
+        document.getElementById(`btn-quiz-view-${layout}`).onclick = () => {
+            applyQuizLibraryLayout(layout);
+            try { localStorage.setItem("powerbi_quiz_library_layout", layout); } catch (_) {}
+        };
+    }
     listContainer.innerHTML = "";
 
     powerBiPresets.forEach((quiz, index) => {
         const card = document.createElement("div");
-        card.className = "card card-hover fade-in-up";
+        card.className = "card card-hover fade-in-up quiz-tile";
+        card.dataset.palette = index % 4;
         card.innerHTML = `
-            <h4>${quiz.title}</h4>
+            <div class="quiz-cover" aria-hidden="true"><span class="quiz-number">${String(index + 1).padStart(2, "0")}</span><span class="quiz-cover-shape"></span><span class="quiz-cover-arrow">↗</span></div>
+            <h4 class="quiz-title"></h4>
             <p class="text-small">${quiz.questions.length} Power BI activities</p>
             <div class="flex gap-2 mt-3">
                 <button class="btn btn-primary flex-1 btn-launch-quiz" data-index="${index}">Launch Challenge</button>
@@ -913,6 +936,7 @@ function renderQuizSelector() {
                 <button class="btn btn-danger btn-delete-quiz" data-index="${index}" style="padding: 0.5rem 0.75rem; background:#ef4444; border:none; border-radius:var(--radius-md); color:white; cursor:pointer;" title="Delete Quiz">🗑️</button>
             </div>
         `;
+        card.querySelector(".quiz-title").textContent = quiz.title;
         listContainer.appendChild(card);
     });
 
@@ -1047,66 +1071,110 @@ function loadQuizIntoMaker(index) {
 }
 
 async function initializeLiveRoom(quiz) {
-    currentRole = "host";
-    currentQuizData = quiz;
-    sessionTotalAnswersCount = 0;
-    sessionTotalCorrectAnswersCount = 0;
+    if (roomCreationInProgress) return;
+    if (!quiz?.questions?.length) {
+        alert("Add at least one question before hosting this quiz.");
+        return;
+    }
+    if (!isFirebaseEnabled) {
+        alert("Live hosting is unavailable because Firebase could not initialize. Check firebase-config.js and reload the page.");
+        return;
+    }
 
-    if (isFirebaseEnabled) {
-        let roomCreated = false;
-        for (let attempt = 0; attempt < 12 && !roomCreated; attempt++) {
-            const candidatePin = Math.floor(100000 + Math.random() * 900000).toString();
-            const candidateRef = ref(database, `${SESSION_ROOT}/${candidatePin}`);
-            const result = await runTransaction(candidateRef, current => {
-                if (current !== null) return;
-                return {
-                    status: "lobby",
-                    quizTitle: quiz.title,
-                    currentQuestion: -1,
-                    timestamp: Date.now(),
-                    publicState: {
+    roomCreationInProgress = true;
+    const launchButtons = Array.from(document.querySelectorAll(".btn-launch-quiz"));
+    const buttonStates = launchButtons.map(button => ({ button, text: button.textContent, disabled: button.disabled }));
+    launchButtons.forEach(button => {
+        button.disabled = true;
+        button.textContent = "Creating room…";
+    });
+    const slowNotice = setTimeout(() => {
+        launchButtons.forEach(button => { button.textContent = "Still connecting — check your internet…"; });
+    }, 10000);
+
+    try {
+        if (isFirebaseEnabled) {
+            let roomCreated = false;
+            for (let attempt = 0; attempt < 12 && !roomCreated; attempt++) {
+                const candidatePin = Math.floor(100000 + Math.random() * 900000).toString();
+                const candidateRef = ref(database, `${SESSION_ROOT}/${candidatePin}`);
+                const result = await runTransaction(candidateRef, current => {
+                    if (current !== null) return;
+                    return {
                         status: "lobby",
-                        currentQuestion: -1
-                    }
-                };
-            });
-            if (result.committed) {
-                currentSessionPin = candidatePin;
-                gameSessionRef = candidateRef;
-                roomCreated = true;
+                        quizTitle: quiz.title,
+                        currentQuestion: -1,
+                        timestamp: Date.now(),
+                        publicState: {
+                            status: "lobby",
+                            currentQuestion: -1
+                        }
+                    };
+                });
+                if (result.committed) {
+                    currentSessionPin = candidatePin;
+                    gameSessionRef = candidateRef;
+                    roomCreated = true;
+                }
+            }
+            if (!roomCreated) {
+                alert("Unable to reserve a unique room PIN. Please try again.");
+                return;
             }
         }
-        if (!roomCreated) {
-            alert("Unable to reserve a unique room PIN. Please try again.");
-            return;
+
+        currentRole = "host";
+        currentQuizData = quiz;
+        sessionTotalAnswersCount = 0;
+        sessionTotalCorrectAnswersCount = 0;
+
+        // Storage can be blocked or full (especially with image-heavy quizzes).
+        // A recovery failure must not hide a successfully created live room.
+        try {
+            sessionStorage.setItem("powerbi_host_session_pin", currentSessionPin);
+            sessionStorage.setItem("powerbi_host_role", "host");
+            sessionStorage.setItem("powerbi_host_quiz", JSON.stringify(currentQuizData));
+        } catch (error) {
+            console.warn("Host refresh recovery could not be saved:", error);
+            try { clearHostSessionStorage(); } catch (_) { /* Storage may be disabled. */ }
         }
-    } else {
-        currentSessionPin = Math.floor(100000 + Math.random() * 900000).toString();
-    }
 
-    sessionStorage.setItem("powerbi_host_session_pin", currentSessionPin);
-    sessionStorage.setItem("powerbi_host_role", "host");
-    sessionStorage.setItem("powerbi_host_quiz", JSON.stringify(currentQuizData));
+        document.getElementById("display-game-pin").innerText = currentSessionPin;
+        updateHostPinDisplays();
+        document.getElementById("display-join-url").innerHTML = `Join at <strong>${window.location.origin}</strong>`;
 
-    document.getElementById("display-game-pin").innerText = currentSessionPin;
-    updateHostPinDisplays();
-    document.getElementById("display-join-url").innerHTML = `Join at <strong>${window.location.origin}</strong>`;
+        const qrContainer = document.getElementById("qr-code-container");
+        if (qrContainer) {
+            qrContainer.innerHTML = "";
+            try {
+                new QRCode(qrContainer, {
+                    text: `${window.location.origin}?pin=${currentSessionPin}`,
+                    width: 160, height: 160, colorDark: "#2B2B2B", colorLight: "#FFFFFF"
+                });
+            } catch (error) {
+                console.warn("QR code unavailable:", error);
+                qrContainer.textContent = "Join using the game PIN above.";
+            }
+        }
 
-    const qrContainer = document.getElementById("qr-code-container");
-    if (qrContainer) {
-        qrContainer.innerHTML = "";
-        new QRCode(qrContainer, {
-            text: `${window.location.origin}?pin=${currentSessionPin}`,
-            width: 160, height: 160, colorDark: "#2B2B2B", colorLight: "#FFFFFF"
+        trackLobbyRegistrations();
+        switchView("hostLobby");
+    } catch (error) {
+        console.error("Unable to create live room:", error);
+        const detail = `${error?.code || ""} ${error?.message || ""}`;
+        if (/permission[_ -]?denied/i.test(detail)) {
+            alert("Firebase denied access, so the game PIN could not be created. In Firebase Console, open kahoots-bi → Realtime Database → Rules and check read/write access for powerbiSessions. Confirm that the published rules belong to the database URL in firebase-config.js and have not expired. The instructor password does not grant database access. After access is corrected, try launching again.");
+        } else {
+            alert("Unable to open the live room. Check your internet connection and Firebase configuration, then try again. Details: " + (error?.message || "Unknown error"));
+        }
+    } finally {
+        clearTimeout(slowNotice);
+        roomCreationInProgress = false;
+        buttonStates.forEach(({ button, text, disabled }) => {
+            button.textContent = text;
+            button.disabled = disabled;
         });
     }
-
-    if (isFirebaseEnabled) {
-        trackLobbyRegistrations();
-    } else {
-        document.getElementById("btn-start-game").disabled = false;
-    }
-    switchView("hostLobby");
 }
 
 function trackLobbyRegistrations() {

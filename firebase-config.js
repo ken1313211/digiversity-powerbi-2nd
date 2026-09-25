@@ -3,14 +3,14 @@ import { getDatabase, ref, set, get, update, onValue, remove, child, push, onChi
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyCKBwPbBoBvGgYgUT03mMBcGnyKbmBfBC0",
-  authDomain: "digiversity-vba.firebaseapp.com",
-  projectId: "digiversity-vba",
-  storageBucket: "digiversity-vba.firebasestorage.app",
-  messagingSenderId: "275180996364",
-  appId: "1:275180996364:web:d800542fa21cb66a912b29",
-  measurementId: "G-MY21PLW0JH",
-  databaseURL: "https://digiversity-vba-default-rtdb.asia-southeast1.firebasedatabase.app"
+  apiKey: "AIzaSyCEuBPiYcwdBASVBX-QVCoWN9TMQzbfwYk",
+  authDomain: "kahoots-bi.firebaseapp.com",
+  projectId: "kahoots-bi",
+  storageBucket: "kahoots-bi.firebasestorage.app",
+  messagingSenderId: "560669020928",
+  appId: "1:560669020928:web:a3be350c311a7d7caf19e5",
+  measurementId: "G-L81DCVHZRG",
+  databaseURL: "https://kahoots-bi-default-rtdb.asia-southeast1.firebasedatabase.app"
 };
 
 let app, database, storage;

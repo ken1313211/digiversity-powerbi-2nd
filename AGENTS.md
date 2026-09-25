@@ -43,7 +43,7 @@ The old IDs are data compatibility identifiers, not current product terminology.
 
 ## Important engineering constraints
 
-- Existing Firebase test rules allow public reads and writes until timestamp `1784563200000`, which is July 21, 2026 at 12:00 AM Singapore time.
+- Firebase now targets `kahoots-bi`. Its test rules allow public reads and writes until timestamp `1798761599000`, which is December 31, 2026 at 23:59:59 UTC (January 1, 2027 at 07:59:59 Singapore time).
 - Do not describe the instructor password as protecting Firebase data.
 - The classroom reliability layer includes atomic nickname claims, stable per-device identity, per-connection presence, refresh recovery, explicit leave cleanup, collision-safe PIN creation, stale-answer filtering, and idempotent scoring.
 - `publicState` must include `questionText`, `questionImage`, `questionOptions`, question numbering, and mode-specific public fields so phones never depend on the projector.

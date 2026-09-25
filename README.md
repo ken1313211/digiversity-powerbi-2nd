@@ -53,7 +53,7 @@ Open the LAN URL on the host too, so generated QR codes use an address students 
 
 The application currently uses:
 
-- Temporary Firebase project: `digiversity-vba`
+- Firebase project: `kahoots-bi` (web configuration verified against Firebase Console).
 - Power BI data is isolated under `settings/powerbi` and `quizzes/powerbi`
 - Realtime Database region: `asia-southeast1`
 - CDN Firebase JavaScript SDK `10.8.0`

@@ -31,6 +31,12 @@ The browser contains all application logic. Firebase Realtime Database is used a
 - `app.js`: presets, app state, branding, login, builder, Firebase reads/writes, lobby, question engine, scoring, recovery, player UI, reactions, preview.
 - `firebase-config.js`: Firebase CDN imports and project configuration.
 
+### Visual design
+
+The Playground redesign uses midnight-blue surfaces, electric-yellow primary actions, coral/blue/mint quiz covers, Space Grotesk headings, and responsive layouts. The landing illustration uses HTML/CSS; no generated bitmap or build step is required. Quiz cards preserve their existing launch/edit/delete controls, and titles are inserted with `textContent`. Forms have explicit labels, browser zoom is enabled, keyboard focus is visible, and reduced-motion preferences are respected.
+
+Design verification: desktop and narrow-phone landing/join layouts, all 8 cloud quizzes displayed, real room/PIN creation, player join, a multiple-choice answer and scored result. Existing hosting regression checks, JavaScript parsing, DOM ID checks, and CSS brace checks passed. All seven modes and the complete presence lifecycle were not rerun for this visual update.
+
 ## 3. Feature inventory
 
 ### Branding
@@ -367,8 +373,8 @@ The player key is restored only when the stored player record matches the browse
 Current Firebase project:
 
 ```text
-projectId: digiversity-vba
-databaseURL: https://digiversity-vba-default-rtdb.asia-southeast1.firebasedatabase.app
+projectId: kahoots-bi
+databaseURL: https://kahoots-bi-default-rtdb.asia-southeast1.firebasedatabase.app
 ```
 
 Firebase Authentication is not implemented.
@@ -378,13 +384,13 @@ Current test rules supplied for the project:
 ```json
 {
   "rules": {
-    ".read": "now < 1784563200000",
-    ".write": "now < 1784563200000"
+    ".read": "now < 1798761599000",
+    ".write": "now < 1798761599000"
   }
 }
 ```
 
-The timestamp expires July 21, 2026 at 12:00 AM Singapore time. Before expiry, anyone with the database URL can read or write everything. After expiry, all application database operations will fail unless rules are replaced.
+The timestamp expires December 31, 2026 at 23:59:59 UTC (January 1, 2027 at 07:59:59 Singapore time). Before expiry, anyone with the database URL can read or write everything. After expiry, all application database operations will fail unless rules are replaced.
 
 The instructor password is present in downloaded JavaScript and cannot secure Firebase.
 
